@@ -15,9 +15,9 @@
  */
 package ghidra.app.util.bin;
 
-import ghidra.util.Msg;
-
 import java.io.*;
+
+import ghidra.util.Msg;
 
 /**
  * Instances of this class support both reading and writing to a
@@ -27,7 +27,7 @@ import java.io.*;
  * This implementation relies on java.net.RandomAccessFile,
  * but adds buffering to limit the amount.
  */
-public class GhidraRandomAccessFile {
+public class GhidraRandomAccessFile implements AutoCloseable {
 	private static final byte[] EMPTY = new byte[0];
 	private static final int BUFFER_SIZE = 0x100000;
 
@@ -90,7 +90,7 @@ public class GhidraRandomAccessFile {
 	 *					that name cannot be created, or if some other error occurs
 	 *            while opening or creating the file
 	 */
-	public GhidraRandomAccessFile(File file, String mode) throws IOException {
+	public GhidraRandomAccessFile(File file, String mode) throws FileNotFoundException {
 		this.file = file;
 		randomAccessFile = new RandomAccessFile(file, mode);
 		this.open = true;
@@ -112,6 +112,7 @@ public class GhidraRandomAccessFile {
 	 * If this file has an associated channel then the channel is closed as well.
 	 * @exception  IOException  if an I/O error occurs.
 	 */
+	@Override
 	public void close() throws IOException {
 		checkOpen();
 		open = false;
@@ -140,8 +141,7 @@ public class GhidraRandomAccessFile {
 	 * @param      pos   the offset position, measured in bytes from the
 	 *                   beginning of the file, at which to set the file
 	 *                   pointer.
-	 * @throws IOException
-	 * @exception  IOException  if <code>pos</code> is less than
+	 * @throws  IOException  if <code>pos</code> is less than
 	 *                          <code>0</code> or if an I/O error occurs.
 	 */
 	public void seek(long pos) throws IOException {
@@ -202,9 +202,9 @@ public class GhidraRandomAccessFile {
 	 * array of bytes. This method blocks until at least one byte of input
 	 * is available.
 	 *
-	 * @param      b     the buffer into which the data is read.
-	 * @param      offset   the start offset of the data.
-	 * @param      length   the maximum number of bytes read.
+	 * @param      b the buffer into which the data is read.
+	 * @param      offset the start offset of the data.
+	 * @param      length the maximum number of bytes read.
 	 * @return     the total number of bytes read into the buffer, or
 	 *             <code>-1</code> if there is no more data because the end of
 	 *             the file has been reached.
@@ -292,8 +292,11 @@ public class GhidraRandomAccessFile {
 
 				buffer = new byte[BUFFER_SIZE];
 				randomAccessFile.seek(bufferFileStartIndex);
-				randomAccessFile.read(buffer);
+				int bytesRead = randomAccessFile.read(buffer);
 				bufferOffset = 0;
+				if (bytesRead <= 0) {
+					throw new EOFException();
+				}
 			}
 			else {
 				bufferOffset = newBufferOffset;

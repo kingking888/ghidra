@@ -198,11 +198,12 @@ public class LocationReferencesProvider extends ComponentProviderAdapter
 	}
 
 	void dispose() {
+		updateManager.dispose();
+		referencesPanel.dispose();
 		highlightManager.dispose();
 		navigatable.removeNavigatableListener(this);
 		program.removeListener(this);
 		program = null;
-		updateManager.dispose();
 
 		tool.removeComponentProvider(this);
 
@@ -374,6 +375,7 @@ public class LocationReferencesProvider extends ComponentProviderAdapter
 		// locationReferencesPlugin.providerDismissed(this); here, as that can trigger a loop
 		// back when we are disposing.
 		clearHighlights();
+		updateManager.dispose();
 		referencesPanel.dispose();
 	}
 
@@ -398,12 +400,7 @@ public class LocationReferencesProvider extends ComponentProviderAdapter
 
 	@Override
 	public ActionContext getActionContext(MouseEvent event) {
-		if (event != null) {
-			if (referencesPanel.selectRow(event)) {
-				return new ActionContext(this, referencesPanel.getTable());
-			}
-		}
-		return null;
+		return new ActionContext(this, referencesPanel.getTable());
 	}
 
 //==================================================================================================

@@ -34,6 +34,9 @@ test { t ->
 	// base classes (eg: AbstractGhidraHeadlessIntegrationTest) in 'test'; they
 	// must go in 'test.slow'.
 	
+	// Do not include suite classes; they trigger the tests in the suite to get run twice
+	// (once by normal jUnit and again when the suite runs).
+	excludes = ['**/*Suite*']
 
 	doFirst {
 		startTestTimer(t)
@@ -122,7 +125,12 @@ def initTestJVM(Task task, String rootDirName) {
 		mkdir testOutputDir
 	}
 	// If false, testing will halt when an error is found.
-	task.ignoreFailures true
+	// TODO: test.java provides test task for nightly jUnits - setting this
+	//       here can cause sub-project builds to proceed even when tests fail.
+	//       If test report not generated that task could be changed to always 
+	//       run even on failure (e.g., options.failOnError(false) )
+	// task.ignoreFailures true
+	task.failFast false
 	
 	// If false, then tests are re-run every time, even if no code has changed.
 	task.outputs.upToDateWhen {false}

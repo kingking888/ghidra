@@ -28,6 +28,7 @@
 #include "loadimage.hh"
 #include "globalcontext.hh"
 #include "comment.hh"
+#include "stringmanage.hh"
 #include "userop.hh"
 #include "options.hh"
 #include "transform.hh"
@@ -103,6 +104,7 @@ public:
 
   static ArchitectureCapability *findCapability(const string &filename);	///< Find an extension to process a file
   static ArchitectureCapability *findCapability(Document *doc);		///< Find an extension to process an XML document
+  static ArchitectureCapability *getCapability(const string &name);	///< Get a capability by name
   static void sortCapabilities(void);					///< Sort extensions
   static uint4 getMajorVersion(void) { return majorversion; }		///< Get \e major decompiler version
   static uint4 getMinorVersion(void) { return minorversion; }		///< Get \e minor decompiler version
@@ -127,9 +129,12 @@ public:
   bool aggressive_ext_trim;	///< Aggressively trim inputs that look like they are sign extended
   bool readonlypropagate;	///< true if readonly values should be treated as constants
   bool infer_pointers;		///< True if we should infer pointers from constants that are likely addresses
-  uintb pointer_lowerbound;	///< Zero or lowest value that can be inferred as an address
+  bool analyze_for_loops;	///< True if we should attempt conversion of \e whiledo loops to \e for loops
+  vector<AddrSpace *> inferPtrSpaces;	///< Set of address spaces in which a pointer constant is inferable
   int4 funcptr_align;		///< How many bits of alignment a function ptr has
   uint4 flowoptions;            ///< options passed to flow following engine
+  uint4 max_instructions;	///< Maximum instructions that can be processed in one function
+  int4 alias_block_level;	///< Aliases blocked by 0=none, 1=struct, 2=array, 3=all
   vector<Rule *> extra_pool_rules; ///< Extra rules that go in the main pool (cpu specific, experimental)
 
   Database *symboltab;		///< Memory map of global variables and functions
@@ -145,6 +150,7 @@ public:
   PcodeInjectLibrary *pcodeinjectlib;	///< Pcode injection manager
   RangeList nohighptr;          ///< Ranges for which high-level pointers are not possible
   CommentDatabase *commentdb;	///< Comments for this architecture
+  StringManager *stringManager;	///< Manager of decoded strings
   ConstantPool *cpool;		///< Deferred constant values
   PrintLanguage *print;	        ///< Current high-level language printer
   vector<PrintLanguage *> printlist;	///< List of high-level language printers supported
@@ -163,6 +169,8 @@ public:
 #endif
   Architecture(void);		///< Construct an uninitialized Architecture
   void init(DocumentStorage &store); ///< Load the image and configure architecture
+  void resetDefaultsInternal(void);	///< Reset default values for options specific to Architecture
+  void resetDefaults(void);		///< Reset defaults values for options owned by \b this
   ProtoModel *getModel(const string &nm) const;		///< Get a specific PrototypeModel
   bool hasModel(const string &nm) const;		///< Does this Architecture have a specific PrototypeModel
   bool highPtrPossible(const Address &loc,int4 size) const; ///< Are pointers possible to the given location?
@@ -171,9 +179,9 @@ public:
   int4 getMinimumLanedRegisterSize(void) const;		///< Get the minimum size of a laned register in bytes
   void setDefaultModel(const string &nm);		///< Set the default PrototypeModel
   void clearAnalysis(Funcdata *fd);			///< Clear analysis specific to a function
-  void readLoaderSymbols(void);		 		///< Read any symbols from loader into database
+  void readLoaderSymbols(const string &delim);		 ///< Read any symbols from loader into database
   void collectBehaviors(vector<OpBehavior *> &behave) const;	///< Provide a list of OpBehavior objects
-  bool hasNearPointers(AddrSpace *spc) const;		///< Does the given address space support \e near pointers
+  SegmentOp *getSegmentOp(AddrSpace *spc) const;	///< Retrieve the \e segment op for the given space if any
   void setPrototype(const PrototypePieces &pieces);	///< Set the prototype for a particular function
   void setPrintLanguage(const string &nm);		///< Establish a particular output language
   void globalify(void);					///< Mark \e all spaces as global
@@ -200,7 +208,7 @@ protected:
   void addNoHighPtr(const Range &rng); ///< Add a new region where pointers do not exist
 
   // Factory routines for building this architecture
-  virtual Scope *buildGlobalScope(void);			///< Build the global scope for this executable
+  virtual Scope *buildDatabase(DocumentStorage &store);		///< Build the database and global scope for this executable
 
   /// \brief Build the Translator object
   ///
@@ -223,6 +231,7 @@ protected:
 
   virtual void buildTypegrp(DocumentStorage &store);		///< Build the data-type factory/container
   virtual void buildCommentDB(DocumentStorage &store);		///< Build the comment database
+  virtual void buildStringManager(DocumentStorage &store);	///< Build the string manager
   virtual void buildConstantPool(DocumentStorage &store);	///< Build the constant pool
   virtual void buildInstructions(DocumentStorage &store);	///< Register the p-code operations
   virtual void buildAction(DocumentStorage &store);		///< Build the Action framework
@@ -241,14 +250,14 @@ protected:
   /// \param trans is the processor disassembly object
   virtual void modifySpaces(Translate *trans)=0;
 
-  virtual void postSpecFile(void) {}		///< Let components initialize after Translate is built
-
+  virtual void postSpecFile(void);		///< Let components initialize after Translate is built
 
   virtual void resolveArchitecture(void)=0;	///< Figure out the processor and compiler of the target executable
 
   void restoreFromSpec(DocumentStorage &store);		///< Fully initialize the Translate object
   void fillinReadOnlyFromLoader(void);			///< Load info about read-only sections
   void initializeSegments();				///< Set up segment resolvers
+  void cacheAddrSpaceProperties(void);			///< Calculate some frequently used space properties and cache them
 
   void parseProcessorConfig(DocumentStorage &store);	///< Apply processor specific configuration
   void parseCompilerConfig(DocumentStorage &store);	///< Apply compiler specific configuration
@@ -267,6 +276,7 @@ protected:
   void parseLaneSizes(const Element *el);		///< Apply lane size configuration
   void parseStackPointer(const Element *el);		///< Apply stack pointer configuration
   void parseDeadcodeDelay(const Element *el);		///< Apply dead-code delay configuration
+  void parseInferPtrBounds(const Element *el);		///< Apply pointer inference bounds
   void parseFuncPtrAlign(const Element *el);		///< Apply function pointer alignment configuration
   void parseSpacebase(const Element *el);		///< Create an additional indexed space
   void parseNoHighPtr(const Element *el);		///< Apply memory alias configuration

@@ -22,8 +22,10 @@ import ghidra.app.decompiler.ClangToken;
 import ghidra.app.decompiler.component.DecompilerPanel;
 import ghidra.app.decompiler.component.DecompilerUtils;
 import ghidra.app.plugin.core.decompile.DecompilerActionContext;
+import ghidra.app.util.HelpTopics;
 import ghidra.program.model.pcode.PcodeOp;
 import ghidra.program.model.pcode.Varnode;
+import ghidra.util.HelpLocation;
 
 public class BackwardsSliceAction extends AbstractDecompilerAction {
 
@@ -31,13 +33,13 @@ public class BackwardsSliceAction extends AbstractDecompilerAction {
 
 	public BackwardsSliceAction() {
 		super("Highlight Backward Slice");
+		setHelpLocation(new HelpLocation(HelpTopics.DECOMPILER, "ActionHighlight"));
 		setPopupMenuData(new MenuData(new String[] { "Highlight", "Backward Slice" }, "Decompile"));
 	}
 
 	@Override
 	protected boolean isEnabledForDecompilerContext(DecompilerActionContext context) {
-		DecompilerPanel decompilerPanel = context.getDecompilerPanel();
-		ClangToken tokenAtCursor = decompilerPanel.getTokenAtCursor();
+		ClangToken tokenAtCursor = context.getTokenAtCursor();
 		Varnode varnode = DecompilerUtils.getVarnodeRef(tokenAtCursor);
 		return varnode != null;
 	}
@@ -45,13 +47,13 @@ public class BackwardsSliceAction extends AbstractDecompilerAction {
 	@Override
 	protected void decompilerActionPerformed(DecompilerActionContext context) {
 
-		DecompilerPanel decompilerPanel = context.getDecompilerPanel();
-		ClangToken tokenAtCursor = decompilerPanel.getTokenAtCursor();
+		ClangToken tokenAtCursor = context.getTokenAtCursor();
 		Varnode varnode = DecompilerUtils.getVarnodeRef(tokenAtCursor);
 		if (varnode == null) {
 			return;
 		}
 
+		DecompilerPanel decompilerPanel = context.getDecompilerPanel();
 		decompilerPanel.clearPrimaryHighlights();
 
 		PcodeOp op = tokenAtCursor.getPcodeOp();

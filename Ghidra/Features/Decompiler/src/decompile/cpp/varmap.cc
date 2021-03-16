@@ -16,46 +16,13 @@
 #include "varmap.hh"
 #include "funcdata.hh"
 
-/// \param ad is the storage address of the variable
-/// \param use is the use point address in code
-/// \param sz is the optional size of the variable
-AddressUsePointPair::AddressUsePointPair(const Address &ad,const Address &use,int4 sz) : addr(ad), useaddr(use)
-
-{
-  size = sz;
-  if (useaddr.isInvalid())	// If invalid
-    useaddr = Address((AddrSpace *)0,0); // Make sure to set offset to zero, so invalids compare equal
-}
-
-/// Compare first by storage address and then by use point address.
-/// Do NOT compare the optional size.
-/// \param op2 is the pair to compare to \b this
-/// \return \b true if \b this should be sorted first
-bool AddressUsePointPair::operator<(const AddressUsePointPair &op2) const
-
-{
-  if (addr != op2.addr)
-    return (addr < op2.addr);
-  return (useaddr < op2.useaddr);
-}
-
-/// Storage addresses and use point addresses must match. Size does not have to match.
-/// \param op2 is the pair to test \b this against for equality
-/// \return \b true if \b the two pairs are equal
-bool AddressUsePointPair::operator==(const AddressUsePointPair &op2) const
-
-{
-  if (addr != op2.addr) return false;
-  return (useaddr == op2.useaddr);
-}
-
 /// \brief Can the given intersecting RangeHint coexist with \b this at their given offsets
 ///
 /// Determine if the data-type information in the two ranges \e line \e up
 /// properly, in which case the union of the two ranges can exist without
 /// destroying data-type information.
 /// \param b is the range to reconcile with \b this
-/// \param \b true if the data-type information can be reconciled
+/// \return \b true if the data-type information can be reconciled
 bool RangeHint::reconcile(const RangeHint *b) const
 
 {
@@ -295,17 +262,17 @@ int4 RangeHint::compare(const RangeHint &op2) const
   return 0;
 }
 
+/// \param id is the globally unique id associated with the function scope
 /// \param spc is the (stack) address space associated with this function's local variables
 /// \param fd is the function associated with these local variables
 /// \param g is the Architecture
-ScopeLocal::ScopeLocal(AddrSpace *spc,Funcdata *fd,Architecture *g) : ScopeInternal(fd->getName(),g)
+ScopeLocal::ScopeLocal(uint8 id,AddrSpace *spc,Funcdata *fd,Architecture *g) : ScopeInternal(id,fd->getName(),g)
 
 {
   space = spc;
   rangeLocked = false;
   stackGrowsNegative = true;
   restrictScope(fd);
-  dedupId = fd->getAddress().getOffset();		// Allow multiple scopes with same name
 } 
 
 /// Turn any symbols that are \e name \e locked but not \e type \e locked into name recommendations
@@ -322,22 +289,18 @@ void ScopeLocal::collectNameRecs(void)
   while(iter!=nametree.end()) {
     Symbol *sym = *iter++;
     if (sym->isNameLocked()&&(!sym->isTypeLocked())) {
-      SymbolEntry *entry = sym->getFirstWholeMap();
-      if (entry != (SymbolEntry *)0) {
-	if (entry->isDynamic()) {
-	  addDynamicRecommend(entry->getFirstUseAddress(), entry->getHash(), sym->getName());
-	}
-	else {
-	  Address usepoint;
-	  if (!entry->getUseLimit().empty()) {
-	    const Range *range = entry->getUseLimit().getFirstRange();
-	    usepoint = Address(range->getSpace(),range->getFirst());
+      if (sym->isThisPointer()) {		// If there is a "this" pointer
+	Datatype *dt = sym->getType();
+	if (dt->getMetatype() == TYPE_PTR) {
+	  if (((TypePointer *)dt)->getPtrTo()->getMetatype() == TYPE_STRUCT) {
+	    // If the "this" pointer points to a class, try to preserve the data-type
+	    // even though the symbol is not preserved.
+	    SymbolEntry *entry = sym->getFirstWholeMap();
+	    typeRecommend.push_back(TypeRecommend(entry->getAddr(),dt));
 	  }
-	  addRecommendName( entry->getAddr(), usepoint, sym->getName(), entry->getSize() );
 	}
-	if (sym->getCategory()<0)
-	  removeSymbol(sym);
       }
+      addRecommendName(sym);	// This deletes the symbol
     }
   }
 }
@@ -447,12 +410,6 @@ string ScopeLocal::buildVariableName(const Address &addr,
 				     Datatype *ct,
 				     int4 &index,uint4 flags) const
 {
-  map<AddressUsePointPair,string>::const_iterator iter;
-  iter = nameRecommend.find( AddressUsePointPair(addr,pc,0));
-  if (iter != nameRecommend.end()) {
-    // We are not checking if the recommended size matches
-    return makeNameUnique((*iter).second);
-  }
   if (((flags & (Varnode::addrtied|Varnode::persist))==Varnode::addrtied) &&
       addr.getSpace() == space) {
     if (fd->getFuncProto().getLocalRange().inRange(addr,1)) {
@@ -521,10 +478,7 @@ void ScopeLocal::createEntry(const RangeHint &a)
   if (num>1)
     ct = glb->types->getTypeArray(num,ct);
 
-  int4 index=0;
-  string nm = buildVariableName(addr,usepoint,ct,index,Varnode::addrtied);
-
-  addSymbol(nm,ct,addr,usepoint);
+  addSymbol("",ct,addr,usepoint);
 }
 
 /// Set up basic offset boundaries for what constitutes a local variable
@@ -835,6 +789,8 @@ void MapState::reconcileDatatypes(void)
 	startDatatype = curDatatype;
       if (curHint->compare(*newList.back()) != 0)
 	newList.push_back(curHint);		// Keep the current hint if it is otherwise different
+      else
+	delete curHint;		// RangeHint is on the heap, so delete if we are not keeping it
     }
     else {
       while(startPos < newList.size()) {
@@ -1140,6 +1096,7 @@ void ScopeLocal::markUnaliased(const vector<uintb> &alias)
   if (rangemap == (EntryMap *)0) return;
   list<SymbolEntry>::iterator iter,enditer;
 
+  int4 alias_block_level = glb->alias_block_level;
   bool aliason = false;
   uintb curalias=0;
   int4 i=0;
@@ -1163,8 +1120,17 @@ void ScopeLocal::markUnaliased(const vector<uintb> &alias)
 	aliason = false;
       if (!aliason)
 	symbol->getScope()->setAttribute(symbol,Varnode::nolocalalias);
-      if (symbol->isTypeLocked())
-	aliason = false;
+      if (symbol->isTypeLocked() && alias_block_level != 0) {
+	if (alias_block_level == 3)
+	  aliason = false;		// For this level, all locked data-types block aliases
+	else {
+	  type_metatype meta = symbol->getType()->getMetatype();
+	  if (meta == TYPE_STRUCT)
+	    aliason = false;		// Only structures block aliases
+	  else if (meta == TYPE_ARRAY && alias_block_level > 1)
+	    aliason = false;		// Only arrays (and structures) block aliases
+	}
+      }
     }
   }
 }
@@ -1219,10 +1185,8 @@ void ScopeLocal::fakeInputSymbols(void)
       
       int4 size = (endpoint - addr.getOffset()) + 1;
       Datatype *ct = fd->getArch()->types->getBase(size,TYPE_UNKNOWN);
-      int4 index = -1;		// NOT a parameter
-      string nm = buildVariableName(addr,usepoint,ct,index,Varnode::input);
       try {
-	addSymbol(nm,ct,addr,usepoint)->getSymbol();
+	addSymbol("",ct,addr,usepoint)->getSymbol();
       }
       catch(LowlevelError &err) {
 	fd->warningHeader(err.explain);
@@ -1232,48 +1196,104 @@ void ScopeLocal::fakeInputSymbols(void)
   }
 }
 
-/// \brief Try to pick recommended names for any unnamed Symbols
+/// \brief Change the primary mapping for the given Symbol to be a specific storage address and use point
+///
+/// Remove any other mapping and create a mapping based on the given storage.
+/// \param sym is the given Symbol to remap
+/// \param addr is the starting address of the storage
+/// \param usepoint is the use point for the mapping
+/// \return the new mapping
+SymbolEntry *ScopeLocal::remapSymbol(Symbol *sym,const Address &addr,const Address &usepoint)
+
+{
+  SymbolEntry *entry = sym->getFirstWholeMap();
+  int4 size = entry->getSize();
+  if (!entry->isDynamic()) {
+    if (entry->getAddr() == addr) {
+      if (usepoint.isInvalid() && entry->getFirstUseAddress().isInvalid())
+	return entry;
+      if (entry->getFirstUseAddress() == usepoint)
+	return entry;
+    }
+  }
+  removeSymbolMappings(sym);
+  RangeList rnglist;
+  if (!usepoint.isInvalid())
+    rnglist.insertRange(usepoint.getSpace(),usepoint.getOffset(),usepoint.getOffset());
+  return addMapInternal(sym,Varnode::mapped,addr,0,size,rnglist);
+}
+
+/// \brief Make the primary mapping for the given Symbol, dynamic
+///
+/// Remove any other mapping and create a new dynamic mapping based on a given
+/// size and hash
+/// \param sym is the given Symbol to remap
+/// \param hash is the dynamic hash
+/// \param usepoint is the use point for the mapping
+/// \return the new dynamic mapping
+SymbolEntry *ScopeLocal::remapSymbolDynamic(Symbol *sym,uint8 hash,const Address &usepoint)
+
+{
+  SymbolEntry *entry = sym->getFirstWholeMap();
+  int4 size = entry->getSize();
+  if (entry->isDynamic()) {
+    if (entry->getHash() == hash && entry->getFirstUseAddress() == usepoint)
+      return entry;
+  }
+  removeSymbolMappings(sym);
+  RangeList rnglist;
+  if (!usepoint.isInvalid())
+    rnglist.insertRange(usepoint.getSpace(),usepoint.getOffset(),usepoint.getOffset());
+  return addDynamicMapInternal(sym,Varnode::mapped,hash,0,size,rnglist);
+}
+
+/// \brief Run through name recommendations, checking if any match unnamed symbols
 ///
 /// Unlocked symbols that are presented to the decompiler are stored off as \e recommended names. These
 /// can be reattached after the decompiler makes a determination of what the final Symbols are.
 /// This method runs through the recommended names and checks if they can be applied to an existing
 /// unnamed Symbol.
-/// \param resname will hold the new name strings
-/// \param ressym will hold the list of Symbols corresponding to the new name strings
-void ScopeLocal::makeNameRecommendationsForSymbols(vector<string> &resname,vector<Symbol *> &ressym) const
+void ScopeLocal::recoverNameRecommendationsForSymbols(void)
 
-{ 				// Find nameable symbols with a varnode rep matching a name recommendation
-  map<AddressUsePointPair,string>::const_iterator iter;
+{
+  Address param_usepoint = fd->getAddress() - 1;
+  list<NameRecommend>::const_iterator iter;
   for(iter=nameRecommend.begin();iter!=nameRecommend.end();++iter) {
-    VarnodeLocSet::const_iterator biter,eiter;
-    bool isaddrtied;
-    const Address &addr((*iter).first.getAddr());
-    const Address &useaddr((*iter).first.getUseAddr());
-    int4 size = (*iter).first.getSize();
-    if (useaddr.isInvalid()) {
-      isaddrtied = true;
-      biter = fd->beginLoc(size,addr);
-      eiter = fd->endLoc(size,addr);
+    const Address &addr((*iter).getAddr());
+    const Address &usepoint((*iter).getUseAddr());
+    int4 size = (*iter).getSize();
+    Symbol *sym;
+    Varnode *vn = (Varnode *)0;
+    if (usepoint.isInvalid()) {
+      SymbolEntry *entry = findOverlap(addr, size);	// Recover any Symbol regardless of usepoint
+      if (entry == (SymbolEntry *)0) continue;
+      if (entry->getAddr() != addr)		// Make sure Symbol has matching address
+	continue;
+      sym = entry->getSymbol();
+      if ((sym->getFlags() & Varnode::addrtied)==0)
+	continue;				// Symbol must be address tied to match this name recommendation
+      vn = fd->findLinkedVarnode(entry);
     }
     else {
-      isaddrtied = false;
-      biter = fd->beginLoc(size,addr,useaddr);
-      eiter = fd->endLoc(size,addr,useaddr);
+      if (usepoint == param_usepoint)
+	vn = fd->findVarnodeInput(size, addr);
+      else
+	vn = fd->findVarnodeWritten(size,addr,usepoint);
+      if (vn == (Varnode *)0) continue;
+      sym = vn->getHigh()->getSymbol();
+      if (sym == (Symbol *)0) continue;
+      if ((sym->getFlags() & Varnode::addrtied)!=0)
+	continue;				// Cannot use untied varnode as primary map for address tied symbol
+      SymbolEntry *entry = sym->getFirstWholeMap();
+      // entry->getAddr() does not need to match address of the recommendation
+      if (entry->getSize() != size) continue;
     }
-    while(biter != eiter) {
-      Varnode *vn = *biter;
-      if (!vn->isAnnotation()) {
-	Symbol *sym = vn->getHigh()->getSymbol();
-	if (sym != (Symbol *)0) {
-	  if (sym->isNameUndefined()) {
-	    resname.push_back( (*iter).second);
-	    ressym.push_back(sym);
-	    break;
-	  }
-	}
-      }
-      if (isaddrtied) break;
-      ++biter;
+    if (!sym->isNameUndefined()) continue;
+    renameSymbol(sym,makeNameUnique((*iter).getName()));
+    setSymbolId(sym, (*iter).getSymbolId());
+    setAttribute(sym, Varnode::namelock);
+    if (vn != (Varnode *)0) {
+      fd->remapVarnode(vn, sym, usepoint);
     }
   }
 
@@ -1288,38 +1308,50 @@ void ScopeLocal::makeNameRecommendationsForSymbols(vector<string> &resname,vecto
     if (vn == (Varnode *)0) continue;
     if (vn->isAnnotation()) continue;
     Symbol *sym = vn->getHigh()->getSymbol();
-    if (sym != (Symbol *)0) {
-      if (sym->isNameUndefined()) {
-	resname.push_back( dynEntry.getName() );
-	ressym.push_back(sym);
-      }
-    }
+    if (sym == (Symbol *)0) continue;
+    if (sym->getScope() != this) continue;
+    if (!sym->isNameUndefined()) continue;
+    renameSymbol(sym,makeNameUnique( dynEntry.getName() ));
+    setAttribute(sym, Varnode::namelock);
+    setSymbolId(sym, dynEntry.getSymbolId());
+    fd->remapDynamicVarnode(vn, sym, dynEntry.getAddress(), dynEntry.getHash());
   }
 }
 
-/// \brief Add a new recommended name to the list
-///
-/// Recommended names are associated with a storage address, a use point, and a suggested size.
-/// The name may be reattached to a Symbol after decompilation.
-/// \param addr is the storage address
-/// \param usepoint is the address of the code use point
-/// \param nm is the recommended name
-/// \param sz is the suggested size the Symbol should match
-void ScopeLocal::addRecommendName(const Address &addr,const Address &usepoint,const string &nm,int4 sz)
+/// Run through the recommended list, search for an input Varnode matching the storage address
+/// and try to apply the data-type to it.  Do not override existing type lock.
+void ScopeLocal::applyTypeRecommendations(void)
 
 {
-  nameRecommend[ AddressUsePointPair(addr,usepoint,sz) ] = nm;
+  list<TypeRecommend>::const_iterator iter;
+  for(iter=typeRecommend.begin();iter!=typeRecommend.end();++iter) {
+    Datatype *dt = (*iter).getType();
+    Varnode *vn = fd->findVarnodeInput(dt->getSize(), (*iter).getAddress());
+    if (vn != (Varnode *)0)
+      vn->updateType(dt, true, false);
+  }
 }
 
-/// \brief Add a new recommended name for a dynamic storage location to the list
-///
-/// This recommended name is assigned a storage location via the DynamicHash mechanism.
+/// The symbol is stored as a name recommendation and then removed from the scope.
+/// Name recommendations are associated either with a storage address and usepoint, or a dynamic hash.
 /// The name may be reattached to a Symbol after decompilation.
-/// \param addr is the address of the code use point
-/// \param hash is the hash encoding context for identifying the storage location
-/// \param nm is the recommended name
-void ScopeLocal::addDynamicRecommend(const Address &usepoint,uint8 hash,const string &nm)
+/// \param sym is the given Symbol to treat as a name recommendation
+void ScopeLocal::addRecommendName(Symbol *sym)
 
 {
-  dynRecommend.push_back(DynamicRecommend(usepoint,hash,nm));
+  SymbolEntry *entry = sym->getFirstWholeMap();
+  if (entry == (SymbolEntry *) 0) return;
+  if (entry->isDynamic()) {
+    dynRecommend.emplace_back(entry->getFirstUseAddress(), entry->getHash(), sym->getName(), sym->getId());
+  }
+  else {
+    Address usepoint((AddrSpace *)0,0);
+    if (!entry->getUseLimit().empty()) {
+      const Range *range = entry->getUseLimit().getFirstRange();
+      usepoint = Address(range->getSpace(), range->getFirst());
+    }
+    nameRecommend.emplace_back(entry->getAddr(),usepoint, entry->getSize(), sym->getName(), sym->getId());
+  }
+  if (sym->getCategory() < 0)
+    removeSymbol(sym);
 }

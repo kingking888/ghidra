@@ -26,6 +26,7 @@ import java.util.stream.Collectors;
 
 import javax.swing.JButton;
 
+import org.junit.Before;
 import org.junit.Test;
 
 import docking.action.DockingActionIf;
@@ -37,11 +38,24 @@ import docking.widgets.fieldpanel.support.FieldLocation;
 import ghidra.app.cmd.comments.SetCommentCmd;
 import ghidra.app.decompiler.ClangLine;
 import ghidra.app.decompiler.ClangToken;
+import ghidra.app.decompiler.DecompileOptions.NamespaceStrategy;
 import ghidra.app.decompiler.component.*;
 import ghidra.app.plugin.core.decompile.actions.*;
+import ghidra.framework.options.ToolOptions;
+import ghidra.framework.plugintool.util.OptionsService;
 import ghidra.program.model.listing.CodeUnit;
 
 public class DecompilerClangTest extends AbstractDecompilerTest {
+
+	@Override
+	@Before
+	public void setUp() throws Exception {
+
+		super.setUp();
+		OptionsService service = provider.getTool().getService(OptionsService.class);
+		ToolOptions opt = service.getOptions("Decompiler");
+		opt.setEnum("Display.Display Namespaces", NamespaceStrategy.Never);
+	}
 
 	@Override
 	protected String getProgramName() {
@@ -755,12 +769,13 @@ public class DecompilerClangTest extends AbstractDecompilerTest {
 		Color color = highlight();
 
 		DecompilerProvider clone = cloneDecompiler();
-		assertAllFieldsHighlighted(clone, secondaryHighlightText, color);
+		ClangToken cloneToken = getToken(clone);
+		assertAllFieldsSecondaryHighlighted(clone, cloneToken, color);
 
 		// ensure one field provider does not affect the other
 		removeSecondaryHighlight();
 		assertNoFieldsSecondaryHighlighted(secondaryHighlightText);
-		assertAllFieldsHighlighted(clone, secondaryHighlightText, color);
+		assertAllFieldsSecondaryHighlighted(clone, cloneToken, color);
 	}
 
 	@Test
@@ -930,14 +945,14 @@ public class DecompilerClangTest extends AbstractDecompilerTest {
 	private void refresh() {
 
 		DockingActionIf action = getAction(decompiler, "Refresh");
-		performAction(action);
+		performAction(action, provider.getActionContext(null), true);
 		waitForDecompiler();
 	}
 
 	private DecompilerProvider cloneDecompiler() {
 
 		DockingActionIf action = getAction(decompiler, "Decompile Clone");
-		performAction(action);
+		performAction(action, provider.getActionContext(null), true);
 		waitForSwing();
 
 		@SuppressWarnings("unchecked")
@@ -989,8 +1004,11 @@ public class DecompilerClangTest extends AbstractDecompilerTest {
 	}
 
 	private Color getCombinedHighlightColor(ClangToken token) {
-		DecompilerController controller = provider.getController();
-		DecompilerPanel panel = controller.getDecompilerPanel();
+		return getCombinedHighlightColor(provider, token);
+	}
+
+	private Color getCombinedHighlightColor(DecompilerProvider theProvider, ClangToken token) {
+		DecompilerPanel panel = theProvider.getDecompilerPanel();
 		ClangHighlightController highlightController = panel.getHighlightController();
 		return highlightController.getCombinedColor(token);
 	}
@@ -1017,7 +1035,7 @@ public class DecompilerClangTest extends AbstractDecompilerTest {
 
 	private void backwardSlice() {
 		DockingActionIf action = getAction(decompiler, BackwardsSliceAction.NAME);
-		performAction(action);
+		performAction(action, provider.getActionContext(null), true);
 	}
 
 	private void middleMouse() {
@@ -1046,7 +1064,7 @@ public class DecompilerClangTest extends AbstractDecompilerTest {
 
 	private void rename(String newName) {
 		DockingActionIf action = getAction(decompiler, "Rename Variable");
-		performAction(action, false);
+		performAction(action, provider.getActionContext(null), false);
 
 		InputDialog dialog = waitForDialogComponent(InputDialog.class);
 		runSwing(() -> dialog.setValue(newName));
@@ -1059,7 +1077,7 @@ public class DecompilerClangTest extends AbstractDecompilerTest {
 
 		DockingActionIf highlightAction =
 			getAction(decompiler, RemoveAllSecondaryHighlightsAction.NAME);
-		performAction(highlightAction);
+		performAction(highlightAction, provider.getActionContext(null), true);
 	}
 
 	private Color highlight() {
@@ -1067,7 +1085,7 @@ public class DecompilerClangTest extends AbstractDecompilerTest {
 		ClangToken token = getToken();
 
 		DockingActionIf highlightAction = getAction(decompiler, SetSecondaryHighlightAction.NAME);
-		performAction(highlightAction);
+		performAction(highlightAction, provider.getActionContext(null), true);
 
 		HighlightToken ht = getSecondaryHighlight(token);
 		assertNotNull("No highlight for token: " + token, ht);
@@ -1088,7 +1106,7 @@ public class DecompilerClangTest extends AbstractDecompilerTest {
 
 		DockingActionIf highlightAction =
 			getAction(decompiler, SetSecondaryHighlightColorChooserAction.NAME);
-		performAction(highlightAction, false);
+		performAction(highlightAction, provider.getActionContext(null), false);
 
 		Window w = waitForWindow("Please Choose a Color");
 		GhidraColorChooser colorChooser = findComponent(w, GhidraColorChooser.class);
@@ -1168,12 +1186,19 @@ public class DecompilerClangTest extends AbstractDecompilerTest {
 		assertAllFieldsHighlighted(provider, name, colorMatcher, ignore);
 	}
 
-	private void assertAllFieldsHighlighted(DecompilerProvider theProvider, String name,
-			Color color) {
+	private void assertAllFieldsSecondaryHighlighted(DecompilerProvider theProvider,
+			ClangToken token, Color color) {
 
-		ColorMatcher cm = new ColorMatcher(color);
-		Predicate<ClangToken> noIgnores = t -> false;
-		assertAllFieldsHighlighted(theProvider, name, cm, noIgnores);
+		Predicate<ClangToken> ignores = t -> t == token;
+		String name = token.getText();
+		Color combinedColor = getCombinedHighlightColor(theProvider, token);
+		ColorMatcher cm = new ColorMatcher(color, combinedColor);
+		assertAllFieldsHighlighted(theProvider, name, cm, ignores);
+
+		// test the token under the cursor directly, as that may have a combined highlight applied		
+		Color actual = token.getHighlight();
+		assertTrue("Token is not highlighted: '" + token + "'" + "\n\texpected: " + cm +
+			"; found: " + toString(actual), cm.matches(actual));
 	}
 
 	private void assertAllFieldsHighlighted(DecompilerProvider theProvider, String name,
@@ -1213,7 +1238,7 @@ public class DecompilerClangTest extends AbstractDecompilerTest {
 		for (DockingActionIf action : actions) {
 			Object service = getInstanceField("clipboardService", action);
 			if (service.getClass().toString().contains("Decomp")) {
-				performAction(action);
+				performAction(action, provider.getActionContext(null), true);
 				return;
 			}
 		}

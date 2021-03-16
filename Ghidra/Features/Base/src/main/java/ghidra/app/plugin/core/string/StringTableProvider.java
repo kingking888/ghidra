@@ -316,8 +316,6 @@ public class StringTableProvider extends ComponentProviderAdapter implements Dom
 		};
 
 		selectionNavigationAction = new SelectionNavigationAction(plugin, table);
-		selectionNavigationAction.setHelpLocation(
-			new HelpLocation(HelpTopics.SEARCH, "Strings_Selection_Navigation"));
 
 		addLocalAction(selectionNavigationAction);
 		addLocalAction(selectAction);
@@ -568,8 +566,9 @@ public class StringTableProvider extends ComponentProviderAdapter implements Dom
 			FoundString foundString = stringModel.getRowObject(table.getSelectedRow());
 			MemBuffer membuf =
 				new DumbMemBufferImpl(currentProgram.getMemory(), foundString.getAddress());
-			StringDataInstance stringInstance = new StringDataInstance(foundString.getDataType(),
-				SettingsImpl.NO_SETTINGS, membuf, foundString.getLength());
+			StringDataInstance stringInstance =
+				StringDataInstance.getStringDataInstance(foundString.getDataType(), membuf,
+					SettingsImpl.NO_SETTINGS, foundString.getLength());
 			if (charOffset != 0) {
 				stringInstance = stringInstance.getCharOffcut(charOffset);
 			}

@@ -31,7 +31,8 @@ public class CommentFieldMouseHandler implements FieldMouseHandlerExtension {
 
 	private final static Class<?>[] SUPPORTED_CLASSES =
 		new Class[] { CommentFieldLocation.class, EolCommentFieldLocation.class,
-			PlateFieldLocation.class, AutomaticCommentFieldLocation.class };
+			PlateFieldLocation.class, AutomaticCommentFieldLocation.class,
+			MemoryBlockStartFieldLocation.class };
 
 	@Override
 	public Class<?>[] getSupportedProgramLocations() {
@@ -58,7 +59,9 @@ public class CommentFieldMouseHandler implements FieldMouseHandlerExtension {
 		}
 
 		String clickedWord =
-			StringUtilities.findWord(comments[commentRow], column, GoToService.VALID_GOTO_CHARS);
+			StringUtilities.findWord(StringUtilities.convertTabsToSpaces(comments[commentRow]),
+				column, GoToService.VALID_GOTO_CHARS);
+
 		return checkWord(clickedWord, serviceProvider, sourceNavigatable);
 	}
 

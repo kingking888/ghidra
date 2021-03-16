@@ -73,10 +73,10 @@ public class SymbolTableCommand extends LoadCommand {
 
 		long index = reader.getPointerIndex();
 
-		reader.setPointerIndex(header.getStartIndexInProvider() + symoff);
+		reader.setPointerIndex(header.getStartIndex() + symoff);
 
 		List<NList> nlistList = new ArrayList<>(nsyms);
-		long startIndex = header.getStartIndexInProvider();
+		long startIndex = header.getStartIndex();
 		boolean is32bit = header.is32bit();
 		reader.setPointerIndex(startIndex + symoff);
 
@@ -84,18 +84,19 @@ public class SymbolTableCommand extends LoadCommand {
 			nlistList.add(NList.createNList(reader, is32bit));
 		}
 		// sort the entries by the index in the string table, so don't jump around reading
-		List<NList> sortedList = nlistList
-				.stream()
-				.sorted(
-					(o1, o2) -> Integer.compare(o1.getStringTableIndex(), o2.getStringTableIndex()))
-				.collect(Collectors.toList());
+		List<NList> sortedList =
+			nlistList.stream().sorted((o1, o2) -> Integer.compare(o1.getStringTableIndex(),
+				o2.getStringTableIndex())).collect(Collectors.toList());
 
-		// initialize the NList strings from string table
+		// initialize the sorted NList strings from string table
 		long stringTableOffset = stroff;
 		for (NList nList : sortedList) {
 			nList.initString(reader, stringTableOffset);
-			symbols.add(nList);
 		}
+
+		// the symbol table should be in the original order.
+		// The table is indexed by other tables in the MachO headers
+		symbols = nlistList;
 
 		reader.setPointerIndex(index);
 	}

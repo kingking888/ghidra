@@ -16,8 +16,7 @@
 package ghidra.app.util.opinion;
 
 import java.math.BigInteger;
-import java.util.ArrayList;
-import java.util.List;
+import java.util.*;
 
 import ghidra.app.util.MemoryBlockUtils;
 import ghidra.app.util.bin.ByteProvider;
@@ -41,7 +40,8 @@ import ghidra.program.model.mem.*;
 import ghidra.program.model.reloc.RelocationTable;
 import ghidra.program.model.symbol.*;
 import ghidra.program.model.util.CodeUnitInsertionException;
-import ghidra.util.*;
+import ghidra.util.DataConverter;
+import ghidra.util.Msg;
 import ghidra.util.exception.DuplicateNameException;
 import ghidra.util.exception.InvalidInputException;
 import ghidra.util.task.TaskMonitor;
@@ -214,26 +214,32 @@ public class MachoProgramBuilder {
 		}
 
 		// Create memory blocks for segments.
-		for (SegmentCommand segment : header.getAllSegments()) {
+		ListIterator<SegmentCommand> it = header.getAllSegments().listIterator();
+		while (it.hasNext()) {
+			int i = it.nextIndex();
+			final SegmentCommand segment = it.next();
+
 			if (monitor.isCancelled()) {
 				break;
 			}
 
 			if (segment.getFileSize() > 0 && (allowZeroAddr || segment.getVMaddress() != 0)) {
-				if (createMemoryBlock(segment.getSegmentName(),
-					space.getAddress(segment.getVMaddress()), segment.getFileOffset(),
-					segment.getFileSize(), segment.getSegmentName(), source, segment.isRead(),
-					segment.isWrite(), segment.isExecute(), false) == null) {
+				String segmentName = segment.getSegmentName();
+				if (segmentName.isBlank()) {
+					segmentName = "SEGMENT." + i;
+				}
+				if (createMemoryBlock(segmentName, space.getAddress(segment.getVMaddress()),
+					segment.getFileOffset(), segment.getFileSize(), segmentName, source,
+					segment.isRead(), segment.isWrite(), segment.isExecute(), false) == null) {
 					log.appendMsg(String.format("Failed to create block: %s 0x%x 0x%x",
 						segment.getSegmentName(), segment.getVMaddress(), segment.getVMsize()));
 				}
 				if (segment.getVMsize() > segment.getFileSize()) {
 					// Pad the remaining address range with uninitialized data
-					if (createMemoryBlock(segment.getSegmentName(),
+					if (createMemoryBlock(segmentName,
 						space.getAddress(segment.getVMaddress()).add(segment.getFileSize()), 0,
-						segment.getVMsize() - segment.getFileSize(), segment.getSegmentName(),
-						source, segment.isRead(), segment.isWrite(), segment.isExecute(),
-						true) == null) {
+						segment.getVMsize() - segment.getFileSize(), segmentName, source,
+						segment.isRead(), segment.isWrite(), segment.isExecute(), true) == null) {
 						log.appendMsg(String.format("Failed to create block: %s 0x%x 0x%x",
 							segment.getSegmentName(), segment.getVMaddress(), segment.getVMsize()));
 					}
@@ -296,8 +302,9 @@ public class MachoProgramBuilder {
 			long dataLength, String comment, String source, boolean r, boolean w, boolean x,
 			boolean zeroFill) throws Exception {
 
-		// iOS 12 address fixup
-		if ((start.getOffset() & 0xfff000000000L) != 0) {
+		// iOS 12 chained pointer address fixup (does not apply to x86)
+		if (!program.getLanguageID().getIdAsString().startsWith("x86") &&
+			(start.getOffset() & 0xfff000000000L) != 0) {
 			start = space.getAddress(start.getOffset() | 0xffff000000000000L);
 		}
 
@@ -605,8 +612,8 @@ public class MachoProgramBuilder {
 		}
 		Address start = getAddress();
 		try {
-			MemoryBlock block = memory.createUninitializedBlock("EXTERNAL", start,
-				undefinedSymbols.size() * machoHeader.getAddressSize(), false);
+			MemoryBlock block = memory.createUninitializedBlock(MemoryBlock.EXTERNAL_BLOCK_NAME,
+				start, undefinedSymbols.size() * machoHeader.getAddressSize(), false);
 			// assume any value in external is writable.
 			block.setWrite(true);
 			block.setSourceName(BLOCK_SOURCE_NAME);
@@ -1341,7 +1348,7 @@ public class MachoProgramBuilder {
 				NList nList = machoHeader.getFirstLoadCommand(SymbolTableCommand.class).getSymbolAt(
 					symbolIndex);
 				Symbol symbol = SymbolUtilities.getLabelOrFunctionSymbol(program, nList.getString(),
-					err -> log.error("Macho", err));
+					err -> log.appendMsg("Macho", err));
 				if (relocation.isPcRelocated()) {
 
 					destinationAddress = symbol.getAddress().subtractWrap(
@@ -1385,8 +1392,7 @@ public class MachoProgramBuilder {
 	}
 
 	private DataConverter getDataConverter() {
-		DataConverter dc = program.getLanguage().isBigEndian() ? new BigEndianDataConverter()
-				: new LittleEndianDataConverter();
+		DataConverter dc = DataConverter.getInstance(program.getLanguage().isBigEndian());
 		return dc;
 	}
 

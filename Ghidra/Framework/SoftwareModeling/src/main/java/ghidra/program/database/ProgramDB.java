@@ -44,7 +44,6 @@ import ghidra.program.database.register.ProgramRegisterContextDB;
 import ghidra.program.database.reloc.RelocationManager;
 import ghidra.program.database.symbol.*;
 import ghidra.program.database.util.AddressSetPropertyMapDB;
-import ghidra.program.disassemble.Disassembler;
 import ghidra.program.model.address.*;
 import ghidra.program.model.lang.*;
 import ghidra.program.model.listing.*;
@@ -58,7 +57,6 @@ import ghidra.program.util.*;
 import ghidra.util.*;
 import ghidra.util.exception.*;
 import ghidra.util.task.TaskMonitor;
-import ghidra.util.task.TaskMonitorAdapter;
 
 /**
  * Database implementation for Program. 
@@ -93,8 +91,15 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 	 * 18-Jul-2018 - version 20 - added support for external locations storing both
 	 *                            address and original-imported-name packed into symbol data3.
 	 *                            Read of old symbol data3 format does not require upgrade.
+	 * 14-May-2020 - version 21 - added support for overlay mapped blocks and byte mapping
+	 *                            schemes other than the default 1:1
+	 * 19-Jun-2020 - version 22 - Corrected fixed length indexing implementation causing
+	 *                            change in index table low-level storage for newly
+	 *                            created tables. 
+	 * 18-Feb-2021 - version 23   Added support for Big Reflist for tracking FROM references.
+	 *                            Primarily used for large numbers of Entry Point references.
 	 */
-	static final int DB_VERSION = 20;
+	static final int DB_VERSION = 23;
 
 	/**
 	 * UPGRADE_REQUIRED_BFORE_VERSION should be changed to DB_VERSION anytime the
@@ -133,10 +138,10 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 	private static final String EXECUTE_FORMAT = "Execute Format";
 	private static final String IMAGE_OFFSET = "Image Offset";
 
-	private final static Class<?>[] COL_CLASS = new Class[] { StringField.class };
+	private final static Field[] COL_FIELDS = new Field[] { StringField.INSTANCE };
 	private final static String[] COL_TYPES = new String[] { "Value" };
 	private final static Schema SCHEMA =
-		new Schema(0, StringField.class, "Key", COL_CLASS, COL_TYPES);
+		new Schema(0, StringField.INSTANCE, "Key", COL_FIELDS, COL_TYPES);
 
 	//
 	// The numbering of managers controls the order in which they are notified.
@@ -198,10 +203,8 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 
 	private OverlaySpaceAdapterDB overlaySpaceAdapter;
 
-	private HashMap<String, AddressSetPropertyMapDB> addrSetPropertyMap = new HashMap<>();
-	private HashMap<String, IntRangeMapDB> intRangePropertyMap = new HashMap<>();
-
-	private HashSet<Long> changedFunctionIDs = new HashSet<>();
+	private Map<String, AddressSetPropertyMapDB> addrSetPropertyMap = new HashMap<>();
+	private Map<String, IntRangeMapDB> intRangePropertyMap = new HashMap<>();
 
 	/**
 	 * Constructs a new ProgramDB
@@ -231,12 +234,12 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 			int id = startTransaction("create program");
 
 			createDatabase();
-			if (createManagers(CREATE, TaskMonitorAdapter.DUMMY_MONITOR) != null) {
+			if (createManagers(CREATE, TaskMonitor.DUMMY) != null) {
 				throw new AssertException("Unexpected version exception on create");
 			}
 			listing = new ListingDB();
 			changeSet = new ProgramDBChangeSet(addrMap, NUM_UNDOS);
-			initManagers(CREATE, TaskMonitorAdapter.DUMMY_MONITOR);
+			initManagers(CREATE, TaskMonitor.DUMMY);
 			propertiesCreate();
 			programUserData = new ProgramUserDataDB(this);
 			endTransaction(id, true);
@@ -272,7 +275,7 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 	 * @throws IOException if an error accessing the database occurs.
 	 * @throws VersionException if database version does not match implementation, UPGRADE may be possible.
 	 * @throws CancelledException if instantiation is canceled by monitor
-	 * @throws LanguageNotFoundException
+	 * @throws LanguageNotFoundException if a language cannot be found for this program
 	 */
 	public ProgramDB(DBHandle dbh, int openMode, TaskMonitor monitor, Object consumer)
 			throws IOException, VersionException, LanguageNotFoundException, CancelledException {
@@ -280,9 +283,9 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 		super(dbh, "Untitled", 500, 1000, consumer);
 
 		if (monitor == null) {
-			monitor = TaskMonitorAdapter.DUMMY;
+			monitor = TaskMonitor.DUMMY;
 		}
-		
+
 		boolean success = false;
 		try {
 			int id = startTransaction("create program");
@@ -368,7 +371,7 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 	/**
 	 * Initialize program compiler specification.
 	 * During a language upgrade this will provide a temporary spec until setLanguage is complete.
-	 * @throws CompilerSpecNotFoundException 
+	 * @throws CompilerSpecNotFoundException if the compiler spec cannot be found
 	 */
 	private void initCompilerSpec() throws CompilerSpecNotFoundException {
 		try {
@@ -398,8 +401,8 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 	 * @param openMode one of:
 	 * 		READ_ONLY: the original database will not be modified
 	 * 		UPDATE: the database can be written to.
-	 * 		UPGRADE: the database is upgraded to the lastest schema as it is opened.
-	 * @throws LanguageNotFoundException 
+	 * 		UPGRADE: the database is upgraded to the latest schema as it is opened.
+	 * @throws LanguageNotFoundException if a language cannot be found for this program
 	 * @return VersionException if language upgrade required
 	 */
 	private VersionException checkLanguageVersion(int openMode) throws LanguageNotFoundException {
@@ -408,8 +411,9 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 
 			Language newLanguage = language;
 
-			Language oldLanguage = OldLanguageFactory.getOldLanguageFactory().getOldLanguage(
-				languageID, languageVersion);
+			Language oldLanguage = OldLanguageFactory.getOldLanguageFactory()
+					.getOldLanguage(
+						languageID, languageVersion);
 			if (oldLanguage == null) {
 				// Assume minor version behavior - old language does not exist for current major version
 				Msg.error(this, "Old language specification not found: " + languageID +
@@ -419,8 +423,9 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 
 			// Ensure that we can upgrade the language
 			languageUpgradeTranslator =
-				LanguageTranslatorFactory.getLanguageTranslatorFactory().getLanguageTranslator(
-					oldLanguage, newLanguage);
+				LanguageTranslatorFactory.getLanguageTranslatorFactory()
+						.getLanguageTranslator(
+							oldLanguage, newLanguage);
 			if (languageUpgradeTranslator == null) {
 
 // TODO: This is a bad situation!! Most language revisions should be supportable, if not we have no choice but to throw 
@@ -450,12 +455,12 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 
 	/**
 	 * Language specified by languageName was not found.  Check for 
-	 * valid language translation/migration.  Old langauge version specified by
+	 * valid language translation/migration.  Old language version specified by
 	 * languageVersion.
 	 * @param openMode one of:
 	 * 		READ_ONLY: the original database will not be modified
 	 * 		UPDATE: the database can be written to.
-	 * 		UPGRADE: the database is upgraded to the lastest schema as it is opened.
+	 * 		UPGRADE: the database is upgraded to the latest schema as it is opened.
 	 * @return true if language upgrade required
 	 * @throws LanguageNotFoundException if a suitable replacement language not found
 	 */
@@ -463,8 +468,9 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 			throws LanguageNotFoundException {
 
 		languageUpgradeTranslator =
-			LanguageTranslatorFactory.getLanguageTranslatorFactory().getLanguageTranslator(
-				languageID, languageVersion);
+			LanguageTranslatorFactory.getLanguageTranslatorFactory()
+					.getLanguageTranslator(
+						languageID, languageVersion);
 		if (languageUpgradeTranslator == null) {
 			throw e;
 		}
@@ -486,7 +492,6 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 		return ve;
 	}
 
-	
 	@Override
 	protected void setDomainFile(DomainFile df) {
 		super.setDomainFile(df);
@@ -514,10 +519,6 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 		changed = origChangeState;
 	}
 
-	/**
-	 * Set the program user data
-	 * @param programUserData
-	 */
 	void setProgramUserData(ProgramUserDataDB programUserData) {
 		this.programUserData = programUserData;
 	}
@@ -571,9 +572,6 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 		return memoryManager;
 	}
 
-	/**
-	 * returns the namespace manager
-	 */
 	public NamespaceManager getNamespaceManager() {
 		return (NamespaceManager) managers[NAMESPACE_MGR];
 	}
@@ -583,16 +581,10 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 		return (ReferenceManager) managers[REF_MGR];
 	}
 
-	/**
-	 * Returns the CodeManager
-	 */
 	public CodeManager getCodeManager() {
 		return (CodeManager) managers[CODE_MGR];
 	}
 
-	/**
-	 * Returns the TreeManager
-	 */
 	public TreeManager getTreeManager() {
 		return (TreeManager) managers[TREE_MGR];
 	}
@@ -655,6 +647,7 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 			format = pl.getString(EXECUTABLE_FORMAT, (String) null);
 		}
 		catch (Exception e) {
+			// handled below
 		}
 		return format == null ? UNKNOWN : format;
 	}
@@ -674,6 +667,7 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 			format = pl.getString(EXECUTABLE_MD5, (String) null);
 		}
 		catch (Exception e) {
+			// handled below
 		}
 		return format == null ? UNKNOWN : format;
 	}
@@ -693,6 +687,7 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 			format = pl.getString(EXECUTABLE_SHA256, (String) null);
 		}
 		catch (Exception e) {
+			// handled below
 		}
 		return format == null ? UNKNOWN : format;
 	}
@@ -910,6 +905,7 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 	 * Notification that a program tree was changed.
 	 * @param id the id of the program tree that was changed.
 	 * @param type the type of change
+	 * @param affectedObj the object that was changed
 	 * @param oldValue old value depends on the type of the change
 	 * @param newValue old value depends on the type of the change
 	 */
@@ -960,7 +956,7 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 	 * @param symbol the symbol that was changed.
 	 * @param type the type of change
 	 * @param addr the address of the symbol that changed
-	 * @param affectedObj
+	 * @param affectedObj the object that was changed
 	 * @param oldValue old value depends on the type of the change
 	 * @param newValue old value depends on the type of the change
 	 */
@@ -1023,10 +1019,6 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 		fireEvent(new ProgramChangeRecord(type, addr, addr, null, oldValue, newValue));
 	}
 
-	public HashSet<Long> getChangedFunctionTagIDs() {
-		return this.changedFunctionIDs;
-	}
-
 	@Override
 	public void setRegisterValuesChanged(Register register, Address start, Address end) {
 		if (recordChanges) {
@@ -1043,27 +1035,11 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 			new ProgramChangeRecord(DOCR_REGISTER_VALUES_CHANGED, start, end, null, null, null));
 	}
 
-	/**
-	 * Mark the state this Program as having changed and generate
-	 * the event.  Any or all parameters may be null.
-	 * @param type event type
-	 * @param oldValue original value
-	 * @param newValue new value
-	 */
 	@Override
 	public void setChanged(int type, Object oldValue, Object newValue) {
 		setChanged(type, (Address) null, (Address) null, oldValue, newValue);
 	}
 
-	/**
-	 * Mark the state this Program as having changed and generate
-	 * the event.  Any or all parameters may be null.
-	 * @param type event type
-	 * @param start starting address that is affected by the event
-	 * @param end ending address that is affected by the event
-	 * @param oldValue original value
-	 * @param newValue new value
-	 */
 	@Override
 	public void setChanged(int type, Address start, Address end, Object oldValue, Object newValue) {
 
@@ -1084,37 +1060,12 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 		fireEvent(new ProgramChangeRecord(type, newstart, newend, null, oldValue, newValue));
 	}
 
-	/**
-	 * Mark the state of a Program as having changed and generate
-	 * the event.  Any or all parameters may be null.
-	 * NOTE: ChangeSet data will not be updated since this a very generic
-	 * change not related to a specific address.
-	 * @param type event type
-	 * @param affectedObj object that is the subject of the event
-	 * @param oldValue original value or an Object that is related to
-	 * the event
-	 * @param newValue new value or an Object that is related to the
-	 * the event
-	 */
 	@Override
 	public void setObjChanged(int type, Object affectedObj, Object oldValue, Object newValue) {
 		changed = true;
 		fireEvent(new ProgramChangeRecord(type, null, null, affectedObj, oldValue, newValue));
 	}
 
-	/**
-	 * Mark the state of a Program as having changed and generate
-	 * the event.  Any or all parameters may be null.
-	 * NOTE: ChangeSet data will not be updated since this a very generic
-	 * change not related to a specific address.
-	 * @param type event type
-	 * @param subType event sub-type
-	 * @param affectedObj object that is the subject of the event
-	 * @param oldValue original value or an Object that is related to
-	 * the event
-	 * @param newValue new value or an Object that is related to the
-	 * the event
-	 */
 	@Override
 	public void setObjChanged(int type, int subType, Object affectedObj, Object oldValue,
 			Object newValue) {
@@ -1123,17 +1074,6 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 			new ProgramChangeRecord(type, subType, null, null, affectedObj, oldValue, newValue));
 	}
 
-	/**
-	 * Mark the state of a Program as having changed and generate
-	 * the event.  Any or all parameters may be null.
-	 * @param type event type
-	 * @param addr program address affected
-	 * @param affectedObj object that is the subject of the event
-	 * @param oldValue original value or an Object that is related to
-	 * the event
-	 * @param newValue new value or an Object that is related to the
-	 * the event
-	 */
 	@Override
 	public void setObjChanged(int type, Address addr, Object affectedObj, Object oldValue,
 			Object newValue) {
@@ -1144,18 +1084,6 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 		fireEvent(new ProgramChangeRecord(type, addr, addr, affectedObj, oldValue, newValue));
 	}
 
-	/**
-	 * Mark the state of a Program as having changed and generate
-	 * the event.  Any or all parameters may be null.
-	 * @param type event type
-	 * @param subType event sub-type
-	 * @param addr program address affected
-	 * @param affectedObj object that is the subject of the event
-	 * @param oldValue original value or an Object that is related to
-	 * the event
-	 * @param newValue new value or an Object that is related to the
-	 * the event
-	 */
 	@Override
 	public void setObjChanged(int type, int subType, Address addr, Object affectedObj,
 			Object oldValue, Object newValue) {
@@ -1167,17 +1095,6 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 			new ProgramChangeRecord(type, subType, addr, addr, affectedObj, oldValue, newValue));
 	}
 
-	/**
-	 * Mark the state of a Program as having changed and generate
-	 * the event.  Any or all parameters may be null.
-	 * @param type event type
-	 * @param addrSet set of program addresses affected
-	 * @param affectedObj object that is the subject of the event
-	 * @param oldValue original value or an Object that is related to
-	 * the event
-	 * @param newValue new value or an Object that is related to the
-	 * the event
-	 */
 	@Override
 	public void setObjChanged(int type, AddressSetView addrSet, Object affectedObj, Object oldValue,
 			Object newValue) {
@@ -1188,9 +1105,6 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 		fireEvent(new ProgramChangeRecord(type, null, null, affectedObj, oldValue, newValue));
 	}
 
-	/**
-	 * Method updateChanges over range
-	 */
 	private void updateChangeSet(Address start, Address end) {
 		ProgramDBChangeSet pcs = (ProgramDBChangeSet) changeSet;
 		if (start != null) {
@@ -1201,23 +1115,12 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 		}
 	}
 
-	/**
-	 * Method updateChanges over address set
-	 */
 	private void updateChangeSet(AddressSetView addrSet) {
 		if (addrSet != null) {
 			((ProgramDBChangeSet) changeSet).add(addrSet);
 		}
 	}
 
-	/**
-	 * Mark the state of a Program as having changed and generate
-	 * the DOCR_CODE_UNIT_PROPERTY_CHANGED event.
-	 * @param propertyName
-	 * @param codeUnitAddr address of the code unit with the property change
-	 * @param oldValue old value for the property
-	 * @param newValue new value for the property
-	 */
 	@Override
 	public void setPropertyChanged(String propertyName, Address codeUnitAddr, Object oldValue,
 			Object newValue) {
@@ -1228,13 +1131,6 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 		fireEvent(new CodeUnitPropertyChangeRecord(propertyName, codeUnitAddr, oldValue, newValue));
 	}
 
-	/**
-	 * Mark the state of a Program as having changed and generate
-	 * the DOCR_CODE_UNIT_PROPERTY_RANGE_REMOVED event.
-	 * @param propertyName name of the property
-	 * @param start start of range of the property being removed
-	 * @param end end of the range of the property being removed
-	 */
 	@Override
 	public void setPropertyRangeRemoved(String propertyName, Address start, Address end) {
 		if (recordChanges) {
@@ -1244,25 +1140,12 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 		fireEvent(new CodeUnitPropertyChangeRecord(propertyName, start, end));
 	}
 
-	/**
-	 * Notify program of a user data change
-	 * @param propertyName
-	 * @param codeUnitAddr
-	 * @param oldValue
-	 * @param newValue
-	 */
 	void userDataChanged(String propertyName, Address codeUnitAddr, Object oldValue,
 			Object newValue) {
 		// Do not update change set!
 		fireEvent(new CodeUnitUserDataChangeRecord(propertyName, codeUnitAddr, oldValue, newValue));
 	}
 
-	/**
-	 * Notification of property change
-	 * @param propertyName
-	 * @param oldValue
-	 * @param newValue
-	 */
 	protected void userDataChanged(String propertyName, Object oldValue, Object newValue) {
 		fireEvent(new UserDataChangeRecord(propertyName, name, name));
 	}
@@ -1274,7 +1157,7 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 			if (name.equals(newName)) {
 				return;
 			}
-			Record record = table.getRecord(new StringField(PROGRAM_NAME));
+			DBRecord record = table.getRecord(new StringField(PROGRAM_NAME));
 			record.setString(0, newName);
 			table.putRecord(record);
 			getTreeManager().setProgramName(name, newName);
@@ -1289,7 +1172,7 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 	}
 
 	private void refreshName() throws IOException {
-		Record record = table.getRecord(new StringField(PROGRAM_NAME));
+		DBRecord record = table.getRecord(new StringField(PROGRAM_NAME));
 		name = record.getString(0);
 	}
 
@@ -1306,43 +1189,55 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 	}
 
 	/**
-	 * Creates a new OverlayAddressSpace with the given name and base AddressSpace
-	 * @param overlaySpaceName the name of the overlay space to create
-	 * @param templateSpace the base AddressSpace to overlay	
-	 * @throws DuplicateNameException if an AddressSpace already exists with the given name.
+	 * Create a new OverlayAddressSpace based upon the given overlay blockName and base AddressSpace
+	 * @param blockName the name of the overlay memory block which corresponds to the new overlay address
+	 * space to be created.  This name may be modified to produce a valid overlay space name and avoid 
+	 * duplication.
+	 * @param originalSpace the base AddressSpace to overlay	
+	 * @param minOffset the min offset of the space
+	 * @param maxOffset the max offset of the space
+	 * @return the new space
 	 * @throws LockException if the program is shared and not checked out exclusively.
 	 * @throws MemoryConflictException if image base override is active
 	 */
-	public AddressSpace addOverlaySpace(String overlaySpaceName, AddressSpace templateSpace,
+	public AddressSpace addOverlaySpace(String blockName, AddressSpace originalSpace,
 			long minOffset, long maxOffset)
-			throws DuplicateNameException, LockException, MemoryConflictException {
+			throws LockException, MemoryConflictException {
 
 		checkExclusiveAccess();
 		if (imageBaseOverride) {
 			throw new MemoryConflictException(
 				"Overlay spaces may not be created while an image-base override is active");
 		}
-		OverlayAddressSpace ovSpace = addressFactory.addOverlayAddressSpace(overlaySpaceName,
-			templateSpace, minOffset, maxOffset);
+
+		OverlayAddressSpace ovSpace = null;
+		lock.acquire();
 		try {
+			ovSpace = addressFactory.addOverlayAddressSpace(blockName, false, originalSpace,
+				minOffset, maxOffset);
 			overlaySpaceAdapter.addOverlaySpace(ovSpace);
 		}
 		catch (IOException e) {
 			dbError(e);
 		}
+		finally {
+			lock.release();
+		}
 		return ovSpace;
 	}
 
-	public void renameOverlaySpace(String oldName, String newName)
-			throws DuplicateNameException, LockException {
+	public void renameOverlaySpace(String oldOverlaySpaceName, String newName)
+			throws LockException {
 		checkExclusiveAccess();
-		addressFactory.renameOverlaySpace(oldName, newName);
-		try {
-			overlaySpaceAdapter.renameOverlaySpace(oldName, newName);
-			addrMap.renameOverlaySpace(oldName, newName);
-		}
-		catch (IOException e) {
-			dbError(e);
+		String revisedName = addressFactory.renameOverlaySpace(oldOverlaySpaceName, newName);
+		if (!revisedName.equals(oldOverlaySpaceName)) {
+			try {
+				overlaySpaceAdapter.renameOverlaySpace(oldOverlaySpaceName, revisedName);
+				addrMap.renameOverlaySpace(oldOverlaySpaceName, revisedName);
+			}
+			catch (IOException e) {
+				dbError(e);
+			}
 		}
 	}
 
@@ -1372,7 +1267,7 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 	}
 
 	private long getStoredBaseImageOffset() throws IOException {
-		Record rec = table.getRecord(new StringField(IMAGE_OFFSET));
+		DBRecord rec = table.getRecord(new StringField(IMAGE_OFFSET));
 		if (rec != null) {
 			return (new BigInteger(rec.getString(0), 16)).longValue();
 		}
@@ -1432,7 +1327,7 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 
 			if (commit) {
 				try {
-					Record record = SCHEMA.createRecord(new StringField(IMAGE_OFFSET));
+					DBRecord record = SCHEMA.createRecord(new StringField(IMAGE_OFFSET));
 					record.setString(0, Long.toHexString(base.getOffset()));
 					table.putRecord(record);
 
@@ -1491,7 +1386,7 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 
 	private void createDatabase() throws IOException {
 		table = dbh.createTable(TABLE_NAME, SCHEMA);
-		Record record = SCHEMA.createRecord(new StringField(PROGRAM_NAME));
+		DBRecord record = SCHEMA.createRecord(new StringField(PROGRAM_NAME));
 		record.setString(0, name);
 		table.putRecord(record);
 
@@ -1526,8 +1421,8 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 	 * <li>LanguageMinorVersion</li>
 	 * </ul>
 	 * @param openMode program open mode
-	 * @return version exception if the current version is out of date and can be upgraded.
-	 * @throws IOException
+	 * @return version exception if the current version is out of date and can be upgraded
+	 * @throws IOException if there is an exception at the database level
 	 * @throws VersionException if the data is newer than this version of Ghidra and can not be
 	 * upgraded or opened.
 	 */
@@ -1539,7 +1434,7 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 		if (table == null) {
 			throw new IOException("Unsupported File Content");
 		}
-		Record record = table.getRecord(new StringField(PROGRAM_NAME));
+		DBRecord record = table.getRecord(new StringField(PROGRAM_NAME));
 		name = record.getString(0);
 
 		record = table.getRecord(new StringField(LANGUAGE_ID));
@@ -1608,7 +1503,7 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 		table = dbh.getTable(TABLE_NAME);
 		Field key = new StringField(PROGRAM_DB_VERSION);
 		String versionStr = Integer.toString(DB_VERSION);
-		Record record = table.getRecord(key);
+		DBRecord record = table.getRecord(key);
 		if (record != null && versionStr.equals(record.getString(0))) {
 			return; // already has correct version
 		}
@@ -1617,12 +1512,8 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 		table.putRecord(record);
 	}
 
-	/**
-	 * Perform more complex upgrades which require all language version translation to 
-	 * be completed 
-	 * @param monitor
-	 * @throws IOException 
-	 * @throws CancelledException 
+	/*
+	 * Perform more complex upgrades which require all language version translation to be completed 
 	 */
 	private void postUpgrade(int oldVersion, TaskMonitor monitor)
 			throws CancelledException, IOException {
@@ -1645,17 +1536,14 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 	}
 
 	public int getStoredVersion() throws IOException {
-		Record record = table.getRecord(new StringField(PROGRAM_DB_VERSION));
-
-		// DB Version was added in 2.1 release (27-May-04)
-		// if record does not exist return 1;
-
+		DBRecord record = table.getRecord(new StringField(PROGRAM_DB_VERSION));
 		if (record != null) {
 			String s = record.getString(0);
 			try {
 				return Integer.parseInt(s);
 			}
 			catch (NumberFormatException e) {
+				// return 1 for invalid value
 			}
 		}
 		return 1;
@@ -1663,7 +1551,7 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 
 	private void checkOldProperties(int openMode, TaskMonitor monitor)
 			throws IOException, VersionException {
-		Record record = table.getRecord(new StringField(EXECUTE_PATH));
+		DBRecord record = table.getRecord(new StringField(EXECUTE_PATH));
 		if (record != null) {
 			if (openMode == READ_ONLY) {
 				return; // not important, get on path or format will return "unknown"
@@ -1705,12 +1593,10 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 
 	}
 
-	/**
+	/*
 	 * External function pointers had previously been wrapped in a function.  This should know be
 	 * handled by creating an external function which corresponds to the pointers external location
 	 * reference.
-	 * @param monitor
-	 * @throws IOException
 	 */
 	private void checkFunctionWrappedPointers(TaskMonitor monitor)
 			throws IOException, CancelledException {
@@ -1795,11 +1681,11 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 		}
 		catch (VersionException e) {
 			if (!e.isUpgradable()) {
-				// Attempt to instatiate the old function manager which may be used for upgrades
+				// Attempt to instantiate the old function manager which may be used for upgrades
 				try {
 					oldFunctionMgr = new OldFunctionManager(dbh, this, addrMap);
 					if (openMode != UPGRADE) {
-						// Indicate that program is upgradeable
+						// Indicate that program is upgradable
 						oldFunctionMgr = null;
 						versionExc = (new VersionException(true)).combine(versionExc);
 					}
@@ -1810,6 +1696,7 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 					}
 				}
 				catch (VersionException e1) {
+					// TODO why does this happen?  should we log this?
 				}
 			}
 			else {
@@ -2058,12 +1945,14 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 	}
 
 	/**
-	 * Moves all information stored in the given range to the new location.
-	 * @param fromAddr the first address in the range to be moved.
-	 * @param toAddr the address to move to.
-	 * @param length the number of addresses to move.
-	 * @param monitor the task monitor to use while deleting information in the given range.
-	 * @throws RollbackException if the user cancelled the operation via the task monitor.
+	 * Moves all information stored in the given range to the new location
+	 * 
+	 * @param fromAddr the first address in the range to be moved
+	 * @param toAddr the address to move to
+	 * @param length the number of addresses to move
+	 * @param monitor the task monitor to use while deleting information in the given range
+	 * @throws AddressOverflowException if there is a problem moving address ranges
+	 * @throws RollbackException if the user cancelled the operation via the task monitor
 	 */
 	public void moveAddressRange(Address fromAddr, Address toAddr, long length, TaskMonitor monitor)
 			throws AddressOverflowException, RollbackException {
@@ -2103,23 +1992,6 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 		return globalNamespace;
 	}
 
-//	private void updateCompilerSpec(Language currLanguage, CompilerSpecID currCompilerSpecID, TaskMonitor monitor) {
-//		try {
-//            compilerSpec = currLanguage.getCompilerSpecByID(currCompilerSpecID);
-//            if (compilerSpec == null) {
-//                throw new IllegalArgumentException("Language "
-//                        + currLanguage.getLanguageDescription().getDescription()
-//                        + " does not have a compiler spec " + currCompilerSpecID);
-//            }
-//        }
-//        catch (CompilerSpecNotFoundException e) {
-//            throw new IllegalArgumentException("Language "
-//                    + currLanguage.getLanguageDescription().getDescription()
-//                    + " does not have a compiler spec " + currCompilerSpecID);
-//        }
-//		this.compilerSpecID = currCompilerSpecID;
-//	}
-
 	@Override
 	public void setLanguage(Language newLanguage, CompilerSpecID newCompilerSpecID,
 			boolean forceRedisassembly, TaskMonitor monitor)
@@ -2129,8 +2001,9 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 			return;
 		}
 		LanguageTranslator languageTranslator =
-			LanguageTranslatorFactory.getLanguageTranslatorFactory().getLanguageTranslator(language,
-				newLanguage);
+			LanguageTranslatorFactory.getLanguageTranslatorFactory()
+					.getLanguageTranslator(language,
+						newLanguage);
 		if (languageTranslator == null) {
 			throw new IncompatibleLanguageException("Language translation not supported");
 		}
@@ -2141,8 +2014,9 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 	 * Translate language
 	 * @param translator language translator, if null only re-disassembly will occur.
 	 * @param newCompilerSpecID new compiler specification which corresponds to new language, may be null.
-	 * @param monitor
-	 * @throws LockException 
+	 * @param forceRedisassembly if true a redisassembly will be forced even if not required
+	 * @param monitor task monitor
+	 * @throws LockException if exclusive access is missing 
 	 */
 	public void setLanguage(LanguageTranslator translator, CompilerSpecID newCompilerSpecID,
 			boolean forceRedisassembly, TaskMonitor monitor) throws LockException {
@@ -2153,7 +2027,7 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 		try {
 			setEventsEnabled(false);
 			try {
-				boolean notifyCodeManager = true;
+				boolean redisassemblyRequired = true;
 				int oldLanguageVersion = languageVersion;
 				int oldLanguageMinorVersion = languageMinorVersion;
 				if (translator != null) {
@@ -2168,7 +2042,7 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 				}
 				else if (!forceRedisassembly && language.getVersion() == languageVersion &&
 					language.getMinorVersion() == languageMinorVersion) {
-					notifyCodeManager = false; // compiler spec change only
+					redisassemblyRequired = false; // compiler spec change only
 					Msg.info(this, "Setting compiler spec for Program " + getName() + ": " +
 						compilerSpecID + " -> " + newCompilerSpecID);
 				}
@@ -2207,20 +2081,14 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 				monitor.setProgress(0);
 				ProgramRegisterContextDB contextMgr =
 					(ProgramRegisterContextDB) getProgramContext();
-				if (translator != null) {
+
+				if (redisassemblyRequired) {
 					contextMgr.setLanguage(translator, compilerSpec, memoryManager, monitor);
+					repairContext(oldLanguageVersion, oldLanguageMinorVersion, translator, monitor);
+					getCodeManager().reDisassembleAllInstructions(monitor);
 				}
 				else {
-					// force re-initialization
 					contextMgr.initializeDefaultValues(language, compilerSpec);
-				}
-
-				if (notifyCodeManager) {
-					Disassembler.clearUnimplementedPcodeWarnings(this, null, monitor);
-					repairContext(oldLanguageVersion, oldLanguageMinorVersion, translator, monitor);
-					monitor.setMessage("Updating instructions...");
-					monitor.setProgress(0);
-					getCodeManager().reDisassembleAllInstructions(500, monitor);
 				}
 
 				// Force function manager to reconcile calling conventions
@@ -2232,7 +2100,7 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 					translator.fixupInstructions(this, translator.getOldLanguage(), monitor);
 				}
 
-				Record record = SCHEMA.createRecord(new StringField(LANGUAGE_ID));
+				DBRecord record = SCHEMA.createRecord(new StringField(LANGUAGE_ID));
 				record.setString(0, languageID.getIdAsString());
 				table.putRecord(record);
 				record = SCHEMA.createRecord(new StringField(COMPILER_SPEC_ID));
@@ -2260,13 +2128,9 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 		}
 	}
 
-	/**
-	 * Repair damaged context prior to language upgrade.
-	 * It is assumed that the context has already been upgrade and that the original 
-	 * prototypes and instructions are still intact.
-	 * @param translator optional language translator
-	 * @param monitor
-	 * @throws CancelledException
+	/*
+	 * Repair damaged context prior to language upgrade.  It is assumed that the context has 
+	 * already been upgrade and that the original prototypes and instructions are still intact.
 	 */
 	private void repairContext(int oldLanguageVersion, int oldLanguageMinorVersion,
 			LanguageTranslator translator, TaskMonitor monitor) throws CancelledException {
@@ -2276,15 +2140,12 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 		}
 	}
 
-	/**
+	/*
 	 * Repair damaged ARM/THUMB context prior to language upgrade.  With the release of Ghidra 5.2 
 	 * (which corresponds to the ARM language version of 1.6) the stored context register 
 	 * value is write-protected where instructions exist.
 	 * It is assumed that the context has already been upgrade and that the original 
 	 * prototypes and instructions are still intact.
-	 * @param translator optional language translator
-	 * @param monitor
-	 * @throws CancelledException
 	 */
 	private void repairARMContext(int oldLanguageVersion, int oldLanguageMinorVersion,
 			LanguageTranslator translator, TaskMonitor monitor) throws CancelledException {
@@ -2486,6 +2347,13 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 		super.close();
 		intRangePropertyMap.clear();
 		addrSetPropertyMap.clear();
+		for (ManagerDB manager : managers) {
+			// have to check for null in case we are closing after a failed open. This happens during
+			// testing where we first try to open a program and if it fails, we upgrade and re-open.
+			if (manager != null) {
+				manager.dispose();
+			}
+		}
 	}
 
 	@Override
@@ -2513,7 +2381,13 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
 		List<String> propNames = propList.getOptionNames();
 		Collections.sort(propNames);
 		for (String propName : propNames) {
-			metadata.put(propName, propList.getValueAsString(propName));
+			if (propName.indexOf(Options.DELIMITER) >= 0) {
+				continue; // ignore second tier options
+			}
+			String valueAsString = propList.getValueAsString(propName);
+			if (valueAsString != null) {
+				metadata.put(propName, propList.getValueAsString(propName));
+			}
 		}
 		return metadata;
 	}

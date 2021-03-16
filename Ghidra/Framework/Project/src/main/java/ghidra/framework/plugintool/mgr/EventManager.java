@@ -237,6 +237,18 @@ public class EventManager {
 	}
 
 	/**
+	 * Clear last plugin events fired, current event, listeners, etc.
+	 */
+	public void clear() {
+		allEventListeners.clear();
+		toolListeners.clear();
+		currentEvent = null;
+		lastEventsByType.clear();
+		listenersByEventType.clear();
+		eventQ.clear();
+	}
+
+	/**
 	 * Return an array of the last plugin events fired. EventManager maps the event class to the 
 	 * last event fired.
 	 * 
@@ -248,7 +260,7 @@ public class EventManager {
 
 	private void sendEvents() {
 
-		Swing.assertThisIsTheSwingThread("Events must be sent on the Swing thread");
+		Swing.assertSwingThread("Events must be sent on the Swing thread");
 
 		synchronized (eventQ) {
 			currentEvent = eventQ.poll();

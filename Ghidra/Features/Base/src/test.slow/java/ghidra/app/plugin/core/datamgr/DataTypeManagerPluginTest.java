@@ -39,9 +39,13 @@ import docking.DockingUtils;
 import docking.action.DockingActionIf;
 import docking.action.ToggleDockingActionIf;
 import docking.actions.KeyBindingUtils;
+import docking.tool.ToolConstants;
+import docking.tool.util.DockingToolConstants;
 import docking.widgets.OptionDialog;
 import docking.widgets.tree.GTreeNode;
 import ghidra.app.context.ProgramActionContext;
+import ghidra.app.plugin.core.compositeeditor.ApplyAction;
+import ghidra.app.plugin.core.compositeeditor.CompositeEditorTableAction;
 import ghidra.app.plugin.core.datamgr.actions.CreateTypeDefDialog;
 import ghidra.app.plugin.core.datamgr.archive.Archive;
 import ghidra.app.plugin.core.datamgr.archive.DataTypeManagerHandler;
@@ -50,6 +54,7 @@ import ghidra.app.plugin.core.function.EditFunctionSignatureDialog;
 import ghidra.app.plugin.core.programtree.ProgramTreePlugin;
 import ghidra.app.services.ProgramManager;
 import ghidra.app.util.datatype.DataTypeSelectionEditor;
+import ghidra.framework.options.ToolOptions;
 import ghidra.framework.plugintool.Plugin;
 import ghidra.framework.plugintool.PluginTool;
 import ghidra.program.database.ProgramBuilder;
@@ -57,7 +62,6 @@ import ghidra.program.database.ProgramDB;
 import ghidra.program.database.data.ProgramDataTypeManager;
 import ghidra.program.model.data.*;
 import ghidra.test.*;
-import ghidra.util.Msg;
 import ghidra.util.classfinder.ClassFilter;
 import ghidra.util.classfinder.ClassSearcher;
 import ghidra.util.task.TaskMonitor;
@@ -201,7 +205,33 @@ public class DataTypeManagerPluginTest extends AbstractGhidraHeadedIntegrationTe
 		waitForSwing();
 
 		waitForTree();
-		SwingUtilities.invokeAndWait(() -> jTree.stopEditing());
+
+		// verify that  the tree opens a new node with the default
+		// category name is "New Category"
+		assertEquals(childCount + 1, miscNode.getChildCount());
+		GTreeNode node = miscNode.getChild("New Category");
+		assertNotNull(node);
+	}
+
+	@Test
+	public void testCreateCategory_WhileFiltered() throws Exception {
+		// select a category
+		GTreeNode miscNode = programNode.getChild("MISC");
+		assertNotNull(miscNode);
+		expandNode(miscNode);
+
+		int childCount = miscNode.getChildCount();
+		selectNode(miscNode);
+
+		filterTree(miscNode.getName());
+
+		DockingActionIf action = getAction(plugin, "New Category");
+		assertTrue(action.isEnabledForContext(treeContext));
+
+		// select "New Category" action
+		DataTypeTestUtils.performAction(action, tree, false);
+
+		waitForDialogComponent("Cannot Edit Tree Node");
 
 		// verify that  the tree opens a new node with the default
 		// category name is "New Category"
@@ -359,7 +389,7 @@ public class DataTypeManagerPluginTest extends AbstractGhidraHeadedIntegrationTe
 		assertTrue(action.isEnabledForContext(treeContext));
 		DataTypeTestUtils.performAction(action, tree);
 		waitForTree();
-		SwingUtilities.invokeLater(() -> {
+		runSwingLater(() -> {
 			TreePath editingPath = jTree.getEditingPath();
 			GTreeNode editingNode = (GTreeNode) editingPath.getLastPathComponent();
 			int rowForPath = jTree.getRowForPath(editingPath);
@@ -373,11 +403,10 @@ public class DataTypeManagerPluginTest extends AbstractGhidraHeadedIntegrationTe
 			jTree.stopEditing();
 		});
 
-		final OptionDialog d = waitForDialogComponent(OptionDialog.class);
-		runSwing(() -> d.close());
+		close(waitForErrorDialog());
 		waitForSwing();
 
-		assertTrue(!jTree.isEditing());
+		assertFalse(jTree.isEditing());
 	}
 
 	@Test
@@ -402,7 +431,7 @@ public class DataTypeManagerPluginTest extends AbstractGhidraHeadedIntegrationTe
 		selectNode(unionNode);
 
 		pasteAction = getAction(plugin, "Paste");
-		assertTrue(!pasteAction.isEnabledForContext(treeContext));
+		assertFalse(pasteAction.isEnabledForContext(treeContext));
 	}
 
 	@Test
@@ -527,7 +556,7 @@ public class DataTypeManagerPluginTest extends AbstractGhidraHeadedIntegrationTe
 		DataTypeTestUtils.performAction(cutAction, tree, false);
 
 		selectNode(builtInNode);
-		assertTrue(!pasteAction.isEnabledForContext(treeContext));
+		assertFalse(pasteAction.isEnabledForContext(treeContext));
 	}
 
 	@Test
@@ -554,13 +583,13 @@ public class DataTypeManagerPluginTest extends AbstractGhidraHeadedIntegrationTe
 		DataTypeTestUtils.performAction(cutAction, tree);
 
 		selectNode(builtInNode);
-		assertTrue(!pasteAction.isEnabledForContext(treeContext));
+		assertFalse(pasteAction.isEnabledForContext(treeContext));
 	}
 
 	@Test
 	public void testCloseProgram() throws Exception {
 
-		SwingUtilities.invokeAndWait(() -> {
+		runSwing(() -> {
 			ProgramManager pm = tool.getService(ProgramManager.class);
 			pm.closeProgram();
 		});
@@ -627,9 +656,9 @@ public class DataTypeManagerPluginTest extends AbstractGhidraHeadedIntegrationTe
 		env.saveRestoreToolState();
 		plugin = env.getPlugin(DataTypeManagerPlugin.class);
 		ToggleDockingActionIf action = (ToggleDockingActionIf) getAction(plugin, "Filter Arrays");
-		assertTrue(!action.isSelected());
+		assertFalse(action.isSelected());
 		action = (ToggleDockingActionIf) getAction(plugin, "Filter Pointers");
-		assertTrue(!action.isSelected());
+		assertFalse(action.isSelected());
 	}
 
 	@Test
@@ -749,9 +778,27 @@ public class DataTypeManagerPluginTest extends AbstractGhidraHeadedIntegrationTe
 		assertEquals("Tom", fun.getArguments()[2].getName());
 	}
 
-	//==================================================================================================
-	// Private methods
-	//==================================================================================================
+	@Test
+	public void testEditorActionsGetRegisteredWithoutEditing() {
+
+		// the owner for the action is the tool, since the registered item is just a placeholder
+		// because the editor actions are shared actions
+		String owner = " (" + ToolConstants.SHARED_OWNER + ')';
+		String actionName = CompositeEditorTableAction.EDIT_ACTION_PREFIX + ApplyAction.ACTION_NAME;
+		String optionName = actionName + owner;
+		ToolOptions options = tool.getOptions(DockingToolConstants.KEY_BINDINGS);
+
+		String message = "Editor action was not registered before editor was shown";
+		assertTrue(message, options.isRegistered(optionName));
+
+		DockingActionIf action = getAction(tool, ToolConstants.SHARED_OWNER, actionName);
+		assertNotNull(message, action);
+	}
+
+//==================================================================================================
+// Private methods
+//==================================================================================================
+
 	private void editSignature(String name, String newSignature) {
 		expandNode(programNode);
 		GTreeNode child = programNode.getChild(name);
@@ -972,7 +1019,7 @@ public class DataTypeManagerPluginTest extends AbstractGhidraHeadedIntegrationTe
 
 	private void checkNodesCollapsed(GTreeNode parent) {
 		if (parent != tree.getModelRoot()) {
-			assertTrue(!tree.isExpanded(parent.getTreePath()));
+			assertFalse(tree.isExpanded(parent.getTreePath()));
 		}
 
 		int nchild = parent.getChildCount();
@@ -986,7 +1033,7 @@ public class DataTypeManagerPluginTest extends AbstractGhidraHeadedIntegrationTe
 
 	/**
 	 * This directory is bin in eclipse; it will be a resources directory in the classpath when run 
-	 * in batch mode.  
+	 * in batch mode.   The directory is one specifically created by and for this test.
 	 * @return class output directory
 	 * @throws FileNotFoundException Could not find class output directory
 	 */
@@ -1008,12 +1055,7 @@ public class DataTypeManagerPluginTest extends AbstractGhidraHeadedIntegrationTe
 		try {
 			File binDir = getClassesDirectory();
 			if (binDir.isDirectory()) {
-				Msg.debug(this, "\tdeleting the bin dir...");
-				boolean success = FileUtilities.deleteDir(binDir);
-				Msg.debug(this, "\tsuccess?: " + success);
-			}
-			else {
-				Msg.debug(this, "NOT a directory - not deleting!");
+				FileUtilities.deleteDir(binDir);
 			}
 		}
 		catch (FileNotFoundException e) {

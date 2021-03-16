@@ -27,14 +27,15 @@ import java.util.stream.Collectors;
 import javax.swing.*;
 
 import org.apache.commons.collections4.map.LazyMap;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.jdom.*;
 import org.jdom.input.SAXBuilder;
 import org.jdom.output.XMLOutputter;
 
-import docking.DockingTool;
 import docking.DockingUtils;
+import docking.Tool;
 import docking.action.*;
 import docking.widgets.filechooser.GhidraFileChooser;
 import ghidra.framework.options.ToolOptions;
@@ -402,6 +403,36 @@ public class KeyBindingUtils {
 	}
 
 	/**
+	 * Clears the currently assigned Java key binding for the action by the given name.  This
+	 * method will find the currently assigned key binding, if any, and then remove it.
+	 * 
+	 * @param component the component for which to clear the key binding
+	 * @param actionName the name of the action that should not have a key binding
+	 * @see LookAndFeel
+	 */
+	public static void clearKeyBinding(JComponent component, String actionName) {
+
+		InputMap inputMap = component.getInputMap(JComponent.WHEN_FOCUSED);
+		if (inputMap == null) {
+			return;
+		}
+
+		KeyStroke keyStroke = null;
+		KeyStroke[] keys = inputMap.allKeys();
+		for (KeyStroke ks : keys) {
+			Object object = inputMap.get(ks);
+			if (actionName.equals(object)) {
+				keyStroke = ks;
+				break;
+			}
+		}
+
+		if (keyStroke != null) {
+			clearKeyBinding(component, keyStroke);
+		}
+	}
+
+	/**
 	 * Returns the registered action for the given keystroke, or null of no
 	 * action is bound to that keystroke.
 	 * 
@@ -435,7 +466,7 @@ public class KeyBindingUtils {
 	 * @param tool the tool containing the actions
 	 * @return the actions mapped by their full name (e.g., 'Name (OwnerName)')
 	 */
-	public static Map<String, List<DockingActionIf>> getAllActionsByFullName(DockingTool tool) {
+	public static Map<String, List<DockingActionIf>> getAllActionsByFullName(Tool tool) {
 
 		Map<String, List<DockingActionIf>> result =
 			LazyMap.lazyMap(new HashMap<>(), s -> new LinkedList<>());
@@ -463,7 +494,7 @@ public class KeyBindingUtils {
 	 * @param owner the action owner name
 	 * @return the actions
 	 */
-	public static Set<DockingActionIf> getKeyBindingActionsForOwner(DockingTool tool,
+	public static Set<DockingActionIf> getKeyBindingActionsForOwner(Tool tool,
 			String owner) {
 
 		Map<String, DockingActionIf> deduper = new HashMap<>();
@@ -636,6 +667,8 @@ public class KeyBindingUtils {
 	 * and we want it to look like: "Ctrl-M".
 	 * <br>In Java 1.5.0, Ctrl-M is returned as "ctrl pressed M"
 	 * and we want it to look like: "Ctrl-M".
+	 * <br>In Java 11 we have seen toString() values get printed with repeated text, such 
+	 * as: "shift ctrl pressed SHIFT".  We want to trim off the repeated modifiers.
 	 * 
 	 * @param keyStroke the key stroke  
 	 * @return the string value; the empty string if the key stroke is null
@@ -655,19 +688,19 @@ public class KeyBindingUtils {
 
 		// get the character used in the key stroke
 		int firstIndex = keyString.lastIndexOf(' ') + 1;
-		int ctrlIndex = keyString.indexOf(CTRL, firstIndex);
+		int ctrlIndex = indexOf(keyString, CTRL, firstIndex);
 		if (ctrlIndex >= 0) {
 			firstIndex = ctrlIndex + CTRL.length();
 		}
-		int altIndex = keyString.indexOf(ALT, firstIndex);
+		int altIndex = indexOf(keyString, ALT, firstIndex);
 		if (altIndex >= 0) {
 			firstIndex = altIndex + ALT.length();
 		}
-		int shiftIndex = keyString.indexOf(SHIFT, firstIndex);
+		int shiftIndex = indexOf(keyString, SHIFT, firstIndex);
 		if (shiftIndex >= 0) {
 			firstIndex = shiftIndex + SHIFT.length();
 		}
-		int metaIndex = keyString.indexOf(META, firstIndex);
+		int metaIndex = indexOf(keyString, META, firstIndex);
 		if (metaIndex >= 0) {
 			firstIndex = metaIndex + META.length();
 		}
@@ -684,18 +717,31 @@ public class KeyBindingUtils {
 		StringBuilder buffy = new StringBuilder();
 		if (isShift(modifiers)) {
 			buffy.insert(0, SHIFT + MODIFIER_SEPARATOR);
+			keyString = removeIgnoreCase(keyString, SHIFT);
 		}
 		if (isAlt(modifiers)) {
 			buffy.insert(0, ALT + MODIFIER_SEPARATOR);
+			keyString = removeIgnoreCase(keyString, ALT);
 		}
 		if (isControl(modifiers)) {
 			buffy.insert(0, CTRL + MODIFIER_SEPARATOR);
+			keyString = removeIgnoreCase(keyString, CONTROL);
 		}
 		if (isMeta(modifiers)) {
 			buffy.insert(0, META + MODIFIER_SEPARATOR);
+			keyString = removeIgnoreCase(keyString, META);
 		}
 		buffy.append(keyString);
-		return buffy.toString();
+
+		String text = buffy.toString().trim();
+		if (text.endsWith(MODIFIER_SEPARATOR)) {
+			text = text.substring(0, text.length() - 1);
+		}
+		return text;
+	}
+
+	private static int indexOf(String source, String search, int offset) {
+		return StringUtils.indexOfIgnoreCase(source, search, offset);
 	}
 
 	// ignore the deprecated; remove when we are confident that all tool actions no longer use the 
@@ -906,5 +952,4 @@ public class KeyBindingUtils {
 
 		return selectedFile;
 	}
-
 }

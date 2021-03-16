@@ -196,6 +196,7 @@ void TransformVar::createReplacement(Funcdata *fd)
       if (vn->getSpace()->isBigEndian())
 	bytePos = vn->getSize() - bytePos - byteSize;
       Address addr = vn->getAddr() + bytePos;
+      addr.renormalize(byteSize);
       if (def == (TransformOp *)0)
 	replacement = fd->newVarnode(byteSize,addr);
       else
@@ -225,6 +226,8 @@ void TransformOp::createReplacement(Funcdata *fd)
     fd->opSetOpcode(op, opc);
     while(input.size() < op->numInput())
       fd->opRemoveInput(op, op->numInput()-1);
+    for(int4 i=0;i<op->numInput();++i)
+      fd->opUnsetInput(op,i);			// Clear any remaining inputs
     while(op->numInput() < input.size())
       fd->opInsertInput(op, (Varnode *)0, op->numInput()-1);
   }
@@ -377,7 +380,7 @@ TransformVar *TransformManager::newPreexistingVarnode(Varnode *vn)
 TransformVar *TransformManager::newUnique(int4 size)
 
 {
-  newVarnodes.push_back(TransformVar());
+  newVarnodes.emplace_back();
   TransformVar *res = &newVarnodes.back();
   res->initialize(TransformVar::normal_temp,(Varnode *)0,size*8,size,0);
   return res;
@@ -392,7 +395,7 @@ TransformVar *TransformManager::newUnique(int4 size)
 TransformVar *TransformManager::newConstant(int4 size,int4 lsbOffset,uintb val)
 
 {
-  newVarnodes.push_back(TransformVar());
+  newVarnodes.emplace_back();
   TransformVar *res = &newVarnodes.back();
   res->initialize(TransformVar::constant,(Varnode *)0,size*8,size,(val >> lsbOffset) & calc_mask(size));
   return res;
@@ -404,7 +407,7 @@ TransformVar *TransformManager::newConstant(int4 size,int4 lsbOffset,uintb val)
 TransformVar *TransformManager::newIop(Varnode *vn)
 
 {
-  newVarnodes.push_back(TransformVar());
+  newVarnodes.emplace_back();
   TransformVar *res = &newVarnodes.back();
   res->initialize(TransformVar::constant_iop,(Varnode *)0,vn->getSize()*8,vn->getSize(),vn->getOffset());
   return res;
@@ -496,7 +499,7 @@ TransformVar *TransformManager::newSplit(Varnode *vn,const LaneDescription &desc
 TransformOp *TransformManager::newOpReplace(int4 numParams,OpCode opc,PcodeOp *replace)
 
 {
-  newOps.push_back(TransformOp());
+  newOps.emplace_back();
   TransformOp &rop(newOps.back());
   rop.op = replace;
   rop.replacement = (PcodeOp *)0;
@@ -519,7 +522,7 @@ TransformOp *TransformManager::newOpReplace(int4 numParams,OpCode opc,PcodeOp *r
 TransformOp *TransformManager::newOp(int4 numParams,OpCode opc,TransformOp *follow)
 
 {
-  newOps.push_back(TransformOp());
+  newOps.emplace_back();
   TransformOp &rop(newOps.back());
   rop.op = follow->op;
   rop.replacement = (PcodeOp *)0;
@@ -543,7 +546,7 @@ TransformOp *TransformManager::newOp(int4 numParams,OpCode opc,TransformOp *foll
 TransformOp *TransformManager::newPreexistingOp(int4 numParams,OpCode opc,PcodeOp *originalOp)
 
 {
-  newOps.push_back(TransformOp());
+  newOps.emplace_back();
   TransformOp &rop(newOps.back());
   rop.op = originalOp;
   rop.replacement = (PcodeOp *)0;

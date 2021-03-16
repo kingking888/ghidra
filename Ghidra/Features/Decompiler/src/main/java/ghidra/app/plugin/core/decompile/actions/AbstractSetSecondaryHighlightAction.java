@@ -16,14 +16,17 @@
 package ghidra.app.plugin.core.decompile.actions;
 
 import ghidra.app.decompiler.ClangToken;
-import ghidra.app.decompiler.component.DecompilerPanel;
 import ghidra.app.decompiler.component.TokenHighlights;
 import ghidra.app.plugin.core.decompile.DecompilerActionContext;
+import ghidra.app.util.HelpTopics;
+import ghidra.util.HelpLocation;
 
 public abstract class AbstractSetSecondaryHighlightAction extends AbstractDecompilerAction {
 
 	AbstractSetSecondaryHighlightAction(String name) {
 		super(name);
+		setHelpLocation(
+			new HelpLocation(HelpTopics.DECOMPILER, "ActionSecondaryHighlight"));
 	}
 
 	@Override
@@ -32,13 +35,13 @@ public abstract class AbstractSetSecondaryHighlightAction extends AbstractDecomp
 			return false;
 		}
 
-		DecompilerPanel panel = context.getDecompilerPanel();
-		ClangToken tokenAtCursor = panel.getTokenAtCursor();
+		ClangToken tokenAtCursor = context.getTokenAtCursor();
 		if (tokenAtCursor == null) {
 			return false;
 		}
 
-		TokenHighlights highlightedTokens = panel.getSecondaryHighlightedTokens();
+		TokenHighlights highlightedTokens =
+			context.getDecompilerPanel().getSecondaryHighlightedTokens();
 		if (highlightedTokens.contains(tokenAtCursor)) {
 			return false; // already highlighted
 		}

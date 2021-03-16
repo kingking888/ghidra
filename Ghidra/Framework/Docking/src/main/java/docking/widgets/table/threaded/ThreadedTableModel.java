@@ -24,6 +24,7 @@ import docking.widgets.table.*;
 import docking.widgets.table.sort.DefaultColumnComparator;
 import generic.concurrent.ConcurrentListenerSet;
 import ghidra.framework.plugintool.ServiceProvider;
+import ghidra.util.Swing;
 import ghidra.util.SystemUtilities;
 import ghidra.util.datastruct.*;
 import ghidra.util.exception.*;
@@ -74,9 +75,9 @@ public abstract class ThreadedTableModel<ROW_OBJECT, DATA_SOURCE>
 	 * This variable can be in one of three states:
 	 * 	<ul>
 	 * 		<li>null - signals that there is no filter change taking place</li>
-	 * 		<li>An instance of <code>NullTableFitler</code> - the client has removed the current
+	 * 		<li>An instance of <code>NullTableFilter</code> - the client has removed the current
 	 *          filter by calling {@link #setTableFilter(TableFilter)} with a null value</li>
-	 * 		<li>An instance of a custom <code>TableFitler</code> - the client has changed the
+	 * 		<li>An instance of a custom <code>TableFilter</code> - the client has changed the
 	 *          filter to a non-null value by calling {@link #setTableFilter(TableFilter)}</li>
 	 *  </ul>
 	 */
@@ -123,7 +124,7 @@ public abstract class ThreadedTableModel<ROW_OBJECT, DATA_SOURCE>
 			TaskMonitor monitor, boolean loadIncrementally) {
 		super(serviceProvider);
 
-		if (!SwingUtilities.isEventDispatchThread()) {
+		if (!Swing.isSwingThread()) {
 			throw new AssertException(
 				"You must create the ThreadedTableModel in the AWT Event Dispatch Thread");
 		}
@@ -143,7 +144,7 @@ public abstract class ThreadedTableModel<ROW_OBJECT, DATA_SOURCE>
 		// We are expecting to be in the swing thread.  We want the reload to happen after our
 		// constructor is fully completed since the reload will cause our initialize method to
 		// be called in another thread, thereby creating a possible race condition.
-		SwingUtilities.invokeLater(() -> updateManager.reload());
+		Swing.runLater(() -> updateManager.reload());
 	}
 
 	public boolean isLoadIncrementally() {
@@ -399,7 +400,7 @@ public abstract class ThreadedTableModel<ROW_OBJECT, DATA_SOURCE>
 	 *
 	 * @return true if there is a table filter set.
 	 */
-	public boolean hasFitler() {
+	public boolean hasFilter() {
 		TableFilter<ROW_OBJECT> currentFilter = getTableFilter();
 		return !currentFilter.isEmpty();
 	}
@@ -429,7 +430,7 @@ public abstract class ThreadedTableModel<ROW_OBJECT, DATA_SOURCE>
 			return data;
 		}
 
-		if (!hasFitler()) {
+		if (!hasFilter()) {
 			return data;
 		}
 
@@ -463,14 +464,14 @@ public abstract class ThreadedTableModel<ROW_OBJECT, DATA_SOURCE>
 	}
 
 	/**
-	 * Sets the given <code>TableFitler</code> on this model.  This table filter will then be used
+	 * Sets the given <code>TableFilter</code> on this model.  This table filter will then be used
 	 * by this model in the default {@link #doFilter(List, TableSortingContext, TaskMonitor)}
 	 * method.
-	 * @param tableFitler The filter to use for table filtering.
+	 * @param tableFilter The filter to use for table filtering.
 	 */
 	@Override
-	public void setTableFilter(TableFilter<ROW_OBJECT> tableFitler) {
-		this.pendingTableFilter = tableFitler;
+	public void setTableFilter(TableFilter<ROW_OBJECT> tableFilter) {
+		this.pendingTableFilter = tableFilter;
 		if (pendingTableFilter == null) {
 			// Don't allow the pending filter to be null in this case.  The client has changed
 			// the filter.  If we use null, then we don't know the difference between a client
@@ -480,8 +481,8 @@ public abstract class ThreadedTableModel<ROW_OBJECT, DATA_SOURCE>
 		reFilter();
 	}
 
-	private void setAppliedTableFitler(TableFilter<ROW_OBJECT> tableFitler) {
-		if (tableFitler == null) {
+	private void setAppliedTableFilter(TableFilter<ROW_OBJECT> tableFilter) {
+		if (tableFilter == null) {
 			// null means there was no change to the text filter--so don't set it (see the
 			// javadoc for the filter variables)
 			return;
@@ -532,7 +533,7 @@ public abstract class ThreadedTableModel<ROW_OBJECT, DATA_SOURCE>
 		this.allData = allData;
 		this.filteredData = filteredData;
 
-		setAppliedTableFitler(pendingTableFilter);
+		setAppliedTableFilter(pendingTableFilter);
 		pendingSortContext = null;
 
 		TableSortingContext<ROW_OBJECT> newSortingContext = filteredData.getSortContext();
@@ -617,12 +618,11 @@ public abstract class ThreadedTableModel<ROW_OBJECT, DATA_SOURCE>
 	 */
 	@Override
 	public void fireTableChanged(TableModelEvent e) {
-		if (SwingUtilities.isEventDispatchThread()) {
+		if (Swing.isSwingThread()) {
 			super.fireTableChanged(e);
 			return;
 		}
-		final TableModelEvent e1 = e;
-		SwingUtilities.invokeLater(() -> ThreadedTableModel.super.fireTableChanged(e1));
+		Swing.runLater(() -> ThreadedTableModel.super.fireTableChanged(e));
 	}
 
 	/**
@@ -636,6 +636,7 @@ public abstract class ThreadedTableModel<ROW_OBJECT, DATA_SOURCE>
 			worker.dispose();
 		}
 		doClearData();
+		disposeDynamicColumnData();
 	}
 
 	/**

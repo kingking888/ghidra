@@ -27,26 +27,29 @@
 The following is a list of dependencies, in no particular order.
 This guide includes instructions for obtaining many of these at the relevant step(s).
 You may not need all of these, depending on which portions you are building or developing.
-
+#### At minimum you will need all of the following
 * Java JDK 11 (64-bit) - Free long term support (LTS) versions of JDK 11 are provided by:
     - AdoptOpenJDK
       - https://adoptopenjdk.net/releases.html?variant=openjdk11&jvmVariant=hotspot
     - Amazon Corretto
       - https://docs.aws.amazon.com/corretto/latest/corretto-11-ug/downloads-list.html
-* Eclipse - It must support JDK 11. Eclipse 2018-12 or later should work. Other IDEs may work, but we have not tested them.
-    - https://www.eclipse.org/downloads/
 * Gradle 5.0 or later - We use version 5.0, and tested with up to 5.6.3.
     - https://gradle.org/next-steps/?version=5.0&format=bin
 * A C/C++ compiler - We use GCC on Linux, Xcode (Clang) on macOS, and Visual Studio (2017 or later) on Windows.
     - https://gcc.gnu.org/
     - https://developer.apple.com/xcode/
     - https://visualstudio.microsoft.com/downloads/
-* Git - We use the official installer on Windows. Most Linux distros have git in their repos. Xcode provides git on macOS.
+#### Optional for Development
+* Eclipse - It must support JDK 11. Eclipse 2018-12 or later should work. Other IDEs may work, but we have not tested them.
+    - https://www.eclipse.org/downloads/
+#### Necessary unless a download zip snapshot of the ghidra repository is used
+* Git - We use the official installer on Windows. For windows you can also use the github CLI or git from with (Windows Subsystem for Linux - WSL). Most Linux distros have git in their repos. Xcode provides git on macOS.   You can skip Git if you download a .zip file of the ghidra repository.
     - https://git-scm.com/downloads
-* Bash - This is moot on Linux and macOS. On Windows, we use MinGW. This may be distributed with Git for Windows.
+    - https://cli.github.com/
+#### Optional unless following [Manual download instructions](#manual-download-instructions)
+* Bash - This is moot on Linux and macOS. On Windows, we use MinGW. This may be distributed with Git for Windows.  This can be skipped if using the automatic build.
     - https://osdn.net/projects/mingw/releases/
-* Bison and Flex - We use win-flex-bison v2.5.17. These packages may also be available in MSYS (MinGW). Most Linux distros have these in their repos. Xcode provides these for macOS.
-    - https://sourceforge.net/projects/winflexbison/
+#### Necessary for the development and building of Ghidra, these and more will be downloaded during the [Automatic](#automatic-script-instructions) or the [Manual](#manual-download-instructions) instructions
 * dex2jar. We use version 2.0.
     - https://github.com/pxb1988/dex2jar/releases
 * AXMLPrinter2
@@ -68,10 +71,8 @@ If you need these offline, a reasonable course of action is to set up a developm
 
 ## Install Development and Build Tools
 
-If you're on Windows, install Git, MinGW, Bison, and Flex.
-Many of the commands given below must be executed in Bash (Use git-bash or MSYS from MinGW).
-**IMPORTANT**: The bison and flex executables may be named `win-bison.exe` and `win-flex.exe`.
-Our build cannot currently cope with that, so you should rename them to `bison.exe` and `flex.exe`.
+If you're on Windows, install Git unless you will download a .zip clone of the ghidra repository. If you go the manual route
+many of the commands given below must be executed in Bash (Windows Subsystem for Linux (WSL), or Use git-bash or MSYS from MinGW).
 
 Install OpenJDK 11 and make sure it's the default java.
 
@@ -83,7 +84,7 @@ Install Gradle, add it to your `PATH`, and ensure it is launched using JDK 11.
 
 ## Setup Source Repository
 
-You may choose any directory for your working copy, but these instructions will assume you have cloned the source to `~/git/ghidra`.
+You may choose any directory for your working copy, however these instructions will assume you have cloned the source to `~/git/ghidra`.
 Be sure to adjust the commands to match your chosen working directory if different than suggested:
 
 ```bash
@@ -91,6 +92,7 @@ mkdir ~/git
 cd ~/git
 git clone git@github.com:NationalSecurityAgency/ghidra.git
 ```
+or unzip a snapshot .zip of the ghidra repository
 
 ## Setup Build Dependency Repository
 
@@ -198,7 +200,7 @@ Download `cdt-8.6.0.zip` from The Eclipse Foundation, and place it in:
 
 ```bash
 cd ~/Downloads   # Or wherever
-curl -OL 'http://www.eclipse.org/downloads/download.php?r=1&protocol=https&file=/tools/cdt/releases/8.6/cdt-8.6.0.zip'
+curl -OL 'https://archive.eclipse.org/tools/cdt/releases/8.6/cdt-8.6.0.zip'
 curl -o 'cdt-8.6.0.zip.sha512' -L --retry 3 'https://www.eclipse.org/downloads/sums.php?type=sha512&file=/tools/cdt/releases/8.6/cdt-8.6.0.zip'
 shasum -a 512 -c 'cdt-8.6.0.zip.sha512'
 mkdir -p ~/git/ghidra/GhidraBuild/EclipsePlugins/GhidraDev/GhidraDevPlugin/build/
@@ -245,15 +247,8 @@ gradle prepDev
 The `prepDev` tasks primarily include generating some source, indexing our built-in help, and unpacking some dependencies.
 
 ### Import Eclipse Projects
-To develop/modify Ghidra, import Ghidra into Eclipse using the integrated BuildShip plugin.
-Select __File -> Import__, expand Gradle, and select "Existing Gradle Project."
-Select the root of the source repo as the root Gradle project.
-Be sure to select Gradle 5.0, or point it at your local installation.
-You may see build path errors until the environment is properly prepared, as described below.
-
-*Alternatively*, you may have Gradle generate the Eclipse projects and import those instead.
-This is the way to go if you'd prefer not to activate Gradle's BuildShip plugin.
-From the project root:
+To develop/modify Ghidra, you must first use Gradle to generate Eclipse projects.  From the project 
+root:
 
 ```bash
 gradle eclipse
@@ -270,7 +265,6 @@ Some of Ghidra's components are built for the native platform.
 We currently support Linux, macOS, and Windows 64-bit x86 systems.
 Others should be possible, but we do not test on them.
 
-Ensure bison and flex are installed and in your `PATH`.
 Now build using Gradle:
 
 On Linux:
@@ -356,7 +350,7 @@ this is required to make AWT happy.
 Some features of Ghidra require the curation of rather extensive databases.
 These include the Data Type Archives and Function ID Databases, both of which require collecting header files and libraries for the relevant SDKs and platforms.
 Much of this work is done by hand.
-The archives included in our official builds can be found in the __[ghidra-data]__ repository.
+The archives included in our official builds can be found in the [ghidra-data] repository.
 
 ### Building Data Type Archives
 
@@ -371,7 +365,7 @@ The result can be added to an installation or source tree by copying it to `~/gi
 This task is often done manually from the Ghidra GUI, and the archives included in our official build require a fair bit of fine tuning.
 You will first need to import the relevant libraries from which you'd like to produce a FID database.
 This is often a set of libraries from an SDK.
-We include a variety of Visual Studio platforms in the official build.
+We include a variety of Visual Studio platforms in the official build. The official .fidb files can be found in the ghidra-data repository here https://github.com/NationalSecurityAgency/ghidra-data/tree/master/FunctionID
 
 From a CodeBrowser window, select __File -> Configure__.
 Enable the "Function ID" plugins, and close the dialog.
@@ -381,3 +375,5 @@ Now, select __Tools -> Function ID -> Populate FidDb__ from programs.
 Fill out the options appropriately and click OK.
 
 If you'd like some details of our fine tuning, take a look at `~/git/ghidra/Ghidra/Features/FunctionID/data/building_fid.txt`.
+
+[ghidra-data]: https://github.com/NationalSecurityAgency/ghidra-data

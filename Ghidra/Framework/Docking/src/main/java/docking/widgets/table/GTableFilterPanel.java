@@ -199,13 +199,13 @@ public class GTableFilterPanel<ROW_OBJECT> extends JPanel {
 			String filterLabel) {
 		this.table = table;
 
+		buildPanel(filterLabel);
+
 		uniquePreferenceKey = createUniqueFilterPreferenceKey(table);
 
 		transformer = new DefaultRowFilterTransformer<>(tableModel, table.getColumnModel());
 
 		textFilterModel = installTableModel(tableModel);
-
-		buildPanel(filterLabel);
 
 		TableColumnModel columnModel = table.getColumnModel();
 		columnModel.addColumnModelListener(columnModelListener);
@@ -472,9 +472,17 @@ public class GTableFilterPanel<ROW_OBJECT> extends JPanel {
 
 	private void showFilterDialog(RowObjectFilterModel<ROW_OBJECT> tableModel) {
 		if (columnFilterDialog == null) {
-			DockingWindowManager dockingWindowManager = DockingWindowManager.getInstance(table);
-			loadFilterPreference(dockingWindowManager);
-			columnFilterDialog = new ColumnFilterDialog<>(this, table, tableModel);
+			if (ColumnFilterDialog.hasFilterableColumns(table, tableModel)) {
+				DockingWindowManager dockingWindowManager = DockingWindowManager.getInstance(table);
+				loadFilterPreference(dockingWindowManager);
+				columnFilterDialog = new ColumnFilterDialog<>(this, table, tableModel);
+			}
+			else {
+				Msg.showError(this, this, "Column Filter Error",
+					"This table contains no filterable columns!");
+				return;
+			}
+
 		}
 
 		columnFilterDialog.setCloseCallback(() -> {

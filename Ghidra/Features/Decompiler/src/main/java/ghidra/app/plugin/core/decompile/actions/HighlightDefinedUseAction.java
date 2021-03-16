@@ -19,37 +19,38 @@ import java.util.Set;
 
 import docking.action.MenuData;
 import ghidra.app.decompiler.ClangToken;
-import ghidra.app.decompiler.component.*;
+import ghidra.app.decompiler.component.DecompilerPanel;
+import ghidra.app.decompiler.component.DecompilerUtils;
 import ghidra.app.plugin.core.decompile.DecompilerActionContext;
+import ghidra.app.util.HelpTopics;
 import ghidra.program.model.pcode.PcodeOp;
 import ghidra.program.model.pcode.Varnode;
+import ghidra.util.HelpLocation;
 
 public class HighlightDefinedUseAction extends AbstractDecompilerAction {
-	private final DecompilerController controller;
 
-	public HighlightDefinedUseAction(DecompilerController controller) {
+	public HighlightDefinedUseAction() {
 		super("Highlight Defined Use");
-		this.controller = controller;
+		setHelpLocation(new HelpLocation(HelpTopics.DECOMPILER, "ActionHighlight"));
 		setPopupMenuData(new MenuData(new String[] { "Highlight", "Def-use" }, "Decompile"));
 	}
 
 	@Override
 	protected boolean isEnabledForDecompilerContext(DecompilerActionContext context) {
-		DecompilerPanel decompilerPanel = controller.getDecompilerPanel();
-		ClangToken tokenAtCursor = decompilerPanel.getTokenAtCursor();
+		ClangToken tokenAtCursor = context.getTokenAtCursor();
 		Varnode varnode = DecompilerUtils.getVarnodeRef(tokenAtCursor);
 		return varnode != null;
 	}
 
 	@Override
 	protected void decompilerActionPerformed(DecompilerActionContext context) {
-		DecompilerPanel decompilerPanel = controller.getDecompilerPanel();
-		ClangToken tokenAtCursor = decompilerPanel.getTokenAtCursor();
+		ClangToken tokenAtCursor = context.getTokenAtCursor();
 		Varnode varnode = DecompilerUtils.getVarnodeRef(tokenAtCursor);
 		if (varnode == null) {
 			return;
 		}
 
+		DecompilerPanel decompilerPanel = context.getDecompilerPanel();
 		decompilerPanel.clearPrimaryHighlights();
 
 		Set<Varnode> varnodes = Set.of(varnode);
